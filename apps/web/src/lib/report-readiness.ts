@@ -8,6 +8,8 @@
  * see the Generate tab's confirm-before-generate flow.
  */
 
+import type { Finding } from '@reporter/shared';
+
 const nonEmpty = (s: string | null | undefined): boolean => Boolean(s && s.trim());
 
 /** The normalized values every readiness item is evaluated against. */
@@ -159,4 +161,145 @@ export function computeReadiness(input: ReadinessInput, naKeys: readonly string[
     ready: satisfiedCount === total,
     percent: total === 0 ? 100 : Math.round((satisfiedCount / total) * 100),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Finding warnings — advisory, deliberately NOT readiness items
+// ---------------------------------------------------------------------------
+
+/**
+ * The ways a finding the author has already marked "Ready to report" still renders
+ * worse than they expect. These are advisory and sit *outside* {@link READINESS_ITEMS}
+ * on purpose: every readiness item is a hard gate (`ready` is "all satisfied") and
+ * can be waived into `reportConfig.readinessNa`, so folding warnings in would move
+ * the progress bar for content nobody asked for and mint N/A keys for findings that
+ * may be gone tomorrow. Generation is never blocked by either.
+ *
+ * All four are scoped to **weaknesses**. The detailed finding block — the only place
+ * a severity pill, a Remediation section or an evidence section is rendered — runs
+ * over weaknesses only; a strength appears as one row of the Summary of Strengths
+ * table (title + description). So warning about a strength's missing severity or
+ * remediation would be pure noise, the more so because the server *clears* both on
+ * any finding switched to `strength`.
+ *
+ * A partially-withheld finding (some evidence excluded, some still shown) is not a
+ * warning either: the report renders the remaining evidence and the author already
+ * sees the exclusion badges on the finding page. Only an actually degraded render
+ * earns a row here.
+ */
+export const FINDING_WARNING_KINDS = [
+  'evidenceAllWithheld',
+  'noEvidence',
+  'noSeverity',
+  'noRemediation',
+] as const;
+export type FindingWarningKind = (typeof FINDING_WARNING_KINDS)[number];
+
+/** Just enough of a finding to label and deep-link one row of the panel. */
+export interface WarnedFinding {
+  uuid: string;
+  title: string;
+}
+
+/** Static metadata for one warning (order = display order). */
+interface FindingWarningDef {
+  kind: FindingWarningKind;
+  /** What is missing. */
+  label: string;
+  /** What the report does about it — the reason this is worth a row. */
+  consequence: string;
+  applies: (f: FindingWarningSubject) => boolean;
+}
+
+/**
+ * Exactly the fields a warning reads, so a test fixture (and a future caller with
+ * something less than a full finding) doesn't have to supply the rest. A `Finding`
+ * satisfies it as-is.
+ */
+export type FindingWarningSubject = Pick<
+  Finding,
+  | 'uuid'
+  | 'title'
+  | 'kind'
+  | 'readyToReport'
+  | 'severity'
+  | 'remediation'
+  | 'numEvidence'
+  | 'numEvidenceInReport'
+>;
+
+const FINDING_WARNINGS: FindingWarningDef[] = [
+  {
+    kind: 'evidenceAllWithheld',
+    label: 'All linked evidence is withheld from reports',
+    // The report deliberately prints nothing here rather than "No evidence
+    // attached." — true, but it would read as a false statement about the finding —
+    // so without this warning the gap is invisible until someone reads the PDF.
+    consequence:
+      'Every evidence item linked to this finding is excluded from reports, directly or because the capture it hangs off is. The report renders the finding with no evidence section and no explanation.',
+    applies: (f) => f.numEvidence > 0 && f.numEvidenceInReport === 0,
+  },
+  {
+    kind: 'noEvidence',
+    label: 'No linked evidence',
+    consequence: 'The report prints a bare “No evidence attached.” under the finding.',
+    applies: (f) => f.numEvidence === 0,
+  },
+  {
+    kind: 'noSeverity',
+    label: 'No severity rating',
+    consequence:
+      'The finding is headed by an “Unrated” pill and folds into the informational band of every severity tally.',
+    applies: (f) => f.severity === null,
+  },
+  {
+    kind: 'noRemediation',
+    label: 'No remediation guidance',
+    consequence: 'The report omits the Remediation section, leaving nothing in its place.',
+    applies: (f) => f.remediation.trim() === '',
+  },
+];
+
+/** One warning, with every finding that raises it. Never empty. */
+export interface FindingWarningGroup {
+  kind: FindingWarningKind;
+  label: string;
+  consequence: string;
+  findings: WarnedFinding[];
+}
+
+export interface FindingWarningsResult {
+  /** Only the warnings that fired, in {@link FINDING_WARNING_KINDS} order. */
+  groups: FindingWarningGroup[];
+  /** Total (finding, warning) pairs — one finding can raise several. */
+  total: number;
+  /** How many distinct findings raise at least one warning. */
+  findingCount: number;
+}
+
+/**
+ * Evaluate {@link FINDING_WARNINGS} over an engagement's findings. Takes the whole
+ * list and does its own scoping (ready-to-report weaknesses) so no caller has to
+ * remember which findings the report actually renders in full.
+ */
+export function computeFindingWarnings(
+  findings: readonly FindingWarningSubject[],
+): FindingWarningsResult {
+  const subjects = findings.filter((f) => f.readyToReport && f.kind === 'weakness');
+  const groups: FindingWarningGroup[] = [];
+  const warned = new Set<string>();
+  let total = 0;
+  for (const def of FINDING_WARNINGS) {
+    const hits = subjects.filter((f) => def.applies(f));
+    if (hits.length === 0) continue;
+    groups.push({
+      kind: def.kind,
+      label: def.label,
+      consequence: def.consequence,
+      findings: hits.map((f) => ({ uuid: f.uuid, title: f.title })),
+    });
+    total += hits.length;
+    for (const f of hits) warned.add(f.uuid);
+  }
+  return { groups, total, findingCount: warned.size };
 }

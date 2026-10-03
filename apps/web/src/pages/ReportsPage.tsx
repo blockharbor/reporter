@@ -70,7 +70,7 @@ import {
 } from '../api/hooks.js';
 import { useEngagementPermissions } from '../lib/permissions.js';
 import { useAutosave } from '../hooks/useAutosave.js';
-import { computeReadiness } from '../lib/report-readiness.js';
+import { computeFindingWarnings, computeReadiness } from '../lib/report-readiness.js';
 import { SaveStatusIndicator } from '../components/SaveStatusIndicator.js';
 import { ReportContentForm } from '../components/engagement/ReportContentForm.js';
 import { SectionPreview } from '../components/engagement/SectionPreview.js';
@@ -224,6 +224,10 @@ export function ReportsPage() {
       ),
     [eng, config.readinessNa, readyFindingCount],
   );
+  // Findings the report will render incomplete. Advisory like readiness, and from
+  // the same already-fetched list, but a separate axis: readiness is about the
+  // engagement's report *content*, this is about the findings themselves.
+  const findingWarnings = useMemo(() => computeFindingWarnings(findings), [findings]);
 
   // Live section preview (Configure tab): which section, and a token that bumps to
   // reload the iframe after content/config autosaves land (eng refetches).
@@ -261,12 +265,25 @@ export function ReportsPage() {
   async function generate(format: 'pdf' | 'zip' | 'json') {
     // Flush any pending config edit so the report reflects the latest options.
     await flush();
-    // Readiness is a soft gate: warn (don't block) when required content is missing.
+    // Two soft gates — missing report content, and ready findings that will render
+    // incomplete. Both warn and neither blocks, and they're raised in one prompt so
+    // the author is never asked to confirm the same click twice.
+    const problems: string[] = [];
     if (!readiness.ready) {
       const remaining = readiness.total - readiness.satisfiedCount;
+      problems.push(
+        `${remaining} required item${remaining === 1 ? '' : 's'} still incomplete on the Content tab.`,
+      );
+    }
+    if (findingWarnings.findingCount > 0) {
+      problems.push(
+        `${findingWarnings.findingCount} finding${findingWarnings.findingCount === 1 ? '' : 's'} marked “Ready to report” will render incomplete.`,
+      );
+    }
+    if (problems.length > 0) {
       const ok = await confirm({
-        title: 'Report not marked ready',
-        message: `${remaining} required item${remaining === 1 ? '' : 's'} still incomplete on the Content tab. Generate anyway?`,
+        title: readiness.ready ? 'Some findings will render incomplete' : 'Report not marked ready',
+        message: `${problems.join(' ')} Generate anyway?`,
         confirmLabel: 'Generate anyway',
       });
       if (!ok) return;
@@ -726,6 +743,21 @@ export function ReportsPage() {
                         Content tab
                       </button>{' '}
                       — you can still generate, but you’ll be asked to confirm.
+                    </p>
+                  )}
+                  {findingWarnings.findingCount > 0 && (
+                    <p className="rounded-input border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-xs text-muted">
+                      {findingWarnings.findingCount} finding
+                      {findingWarnings.findingCount === 1 ? '' : 's'} marked “Ready to report” will
+                      render incomplete. See “Findings needing attention” on the{' '}
+                      <button
+                        type="button"
+                        className="text-accent hover:underline"
+                        onClick={() => setSection('content')}
+                      >
+                        Content tab
+                      </button>
+                      .
                     </p>
                   )}
                   <Field label="Report type" htmlFor="rp-preset" hint={REPORT_PRESET_HINTS[preset]}>

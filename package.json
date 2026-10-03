@@ -28,9 +28,13 @@
   "devDependencies": {
     "@eslint/js": "^9.18.0",
     "@reporter/api-client": "workspace:*",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/node": "^22.10.5",
     "eslint": "^9.18.0",
     "globals": "^15.14.0",
+    "jsdom": "^30.1.1",
     "prettier": "^3.4.2",
     "sharp": "^0.33.5",
     "typescript": "^5.7.3",

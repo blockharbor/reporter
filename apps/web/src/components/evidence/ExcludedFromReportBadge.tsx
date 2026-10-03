@@ -1,4 +1,5 @@
 import { Badge } from '@reporter/ui';
+import type { Evidence } from '@reporter/shared';
 
 /** The one wording for the report-exclusion state, shared by every surface that
  *  lists evidence so the timeline, finding cards and the pickers all agree. */
@@ -28,7 +29,8 @@ export const EXCLUDED_FROM_REPORT_INHERITED_HINT =
  *
  * `inherited` marks an item that is withheld because its parent is, not because
  * it carries the flag: same consequence, different thing to do about it, so only
- * the tooltip differs.
+ * the tooltip differs. Most callers should reach for {@link EvidenceExclusionBadge}
+ * rather than deciding that themselves.
  */
 export function ExcludedFromReportBadge({ inherited = false }: { inherited?: boolean }) {
   return (
@@ -41,4 +43,20 @@ export function ExcludedFromReportBadge({ inherited = false }: { inherited?: boo
       </Badge>
     </span>
   );
+}
+
+/**
+ * The badge for one piece of evidence as it appears in a list, or nothing when it
+ * will reach the report. Covers both halves of report exclusion from the serialized
+ * flags, which is the whole point of having it: a surface that tested
+ * `excludeFromReport` alone silently showed linked evidence under an excluded
+ * capture as report-bound, and that bug was easy to reintroduce once per list.
+ */
+export function EvidenceExclusionBadge({
+  evidence,
+}: {
+  evidence: Pick<Evidence, 'excludeFromReport' | 'parentExcludedFromReport'>;
+}) {
+  if (!evidence.excludeFromReport && !evidence.parentExcludedFromReport) return null;
+  return <ExcludedFromReportBadge inherited={!evidence.excludeFromReport} />;
 }

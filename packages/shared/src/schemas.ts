@@ -566,6 +566,15 @@ export const evidenceSchema = z.object({
    *  The one way to get it into a file is an explicit backup export, which carries
    *  the flag so an import restores the exclusion with the evidence. */
   excludeFromReport: z.boolean(),
+  /** True when this is linked evidence hanging off a parent that is itself excluded
+   *  from reports. Exclusion is inherited downwards (the server's one definition of
+   *  report visibility is `REPORT_VISIBLE_EVIDENCE`), so such an item is withheld
+   *  from every report output even though its own `excludeFromReport` is false —
+   *  which is exactly the state a badge has to spell out, since nothing else about
+   *  the row looks withheld. The client can't derive it from `parentEvidenceUuid`
+   *  alone (it never holds the parent row), so the server resolves it. Always false
+   *  for a top-level capture. */
+  parentExcludedFromReport: z.boolean(),
 });
 export type Evidence = z.infer<typeof evidenceSchema>;
 
@@ -617,6 +626,14 @@ export const findingSchema = z.object({
   /** Manual sort position within the engagement's findings (ascending). */
   position: z.number().int().nonnegative(),
   numEvidence: z.number().int().nonnegative(),
+  /** How many of those evidence links will actually reach report output — the
+   *  subset matching the server's `REPORT_VISIBLE_EVIDENCE` predicate, so it also
+   *  discounts *inherited* exclusion (linked evidence under an excluded parent is
+   *  withheld with its own flag clear). Always ≤ `numEvidence`; a plain
+   *  "not excluded" count would overstate it. `numEvidence > 0` with this at 0 is
+   *  the case worth warning about: the report renders the finding with no evidence
+   *  section and says nothing about why. */
+  numEvidenceInReport: z.number().int().nonnegative(),
   /** How many engagement goals this finding is linked to (drives the Findings
    *  page's linked-goals filter/sort). */
   numGoals: z.number().int().nonnegative(),

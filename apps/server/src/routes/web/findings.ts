@@ -8,6 +8,7 @@ import {
   updateFindingInput,
 } from '@reporter/shared';
 import { HttpError, requireAuth, requireEngagementRole } from '../../auth/guards.js';
+import { REPORT_VISIBLE_EVIDENCE } from '../../helpers/report-visibility.js';
 import {
   evidenceInclude,
   serializeFinding,
@@ -16,8 +17,18 @@ import {
 
 // Every finding read (list + detail) carries its link counts: attached evidence and
 // linked goals. The Findings page filters/sorts on both, client-side.
+//
+// `numEvidenceInReport` needs a *report-filtered* count of that same evidence
+// relation, and Prisma's `_count` has no aliasing — `evidence` may appear in it
+// once, filtered or not — so the two counts can't be siblings there. Same answer as
+// `findings-report.ts`'s gather: keep the unfiltered `_count` for the true total and
+// pair it with a filtered relation include whose length is the report-visible count.
+// Only the link's id is selected, so this costs one narrow join and nothing is
+// loaded that isn't counted. These rows never reach the wire: no route serializes
+// them, and the detail route below replaces the `evidence` key of its response.
 const findingInclude = {
   category: true,
+  evidence: { where: { evidence: REPORT_VISIBLE_EVIDENCE }, select: { evidenceId: true } },
   _count: { select: { evidence: true, goals: true } },
 } as const;
 

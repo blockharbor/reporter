@@ -18,7 +18,7 @@ import {
 } from '@reporter/shared';
 import { useFindings, useUpdateEngagement } from '../../api/hooks.js';
 import { useAutosave } from '../../hooks/useAutosave.js';
-import { computeReadiness } from '../../lib/report-readiness.js';
+import { computeFindingWarnings, computeReadiness } from '../../lib/report-readiness.js';
 import { SaveStatusIndicator } from '../SaveStatusIndicator.js';
 import {
   CONTENT_SECTION_IDS,
@@ -26,6 +26,7 @@ import {
   SectionCollapseContext,
   type SectionStatus,
 } from './ReportContentEditors.js';
+import { FindingsNeedingAttention } from './FindingsNeedingAttention.js';
 import { ReportReadiness } from './ReportReadiness.js';
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -244,6 +245,10 @@ export function ReportContentForm({
       ),
     [form, readinessNa, readyFindingCount],
   );
+  // Advisory, alongside readiness rather than inside it: ready findings the report
+  // will render incomplete. Computed from the same findings list the gate above
+  // reduces to a single count.
+  const findingWarnings = useMemo(() => computeFindingWarnings(findings), [findings]);
   const statusOf = (key: string): SectionStatus | undefined => {
     const it = readiness.items.find((i) => i.key === key);
     return it ? (it.complete ? 'complete' : it.na ? 'na' : 'incomplete') : undefined;
@@ -303,6 +308,7 @@ export function ReportContentForm({
         onToggleNa={onToggleReadinessNa}
         findingsHref={`/engagements/${slug}/findings`}
       />
+      <FindingsNeedingAttention slug={slug} result={findingWarnings} />
       <Card className="space-y-4 p-4 lg:col-span-2">
         <div className="flex items-start justify-between gap-2">
           <div>

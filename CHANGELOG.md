@@ -20,6 +20,26 @@ with `pnpm run version:bump <major|minor|patch>`.
   withheld would hand over a fragment of a withheld capture. It all stays **fully
   visible in the app** — timeline, finding pages, and pickers — badged **Excluded
   from reports**, so it can always be un-excluded.
+- **Excluding evidence affects future report output only**, and the **Report** card
+  now says so at the moment you tick the box. Entries in **Reports → Report history**
+  are left exactly as they were: a generated report is the immutable record of what
+  was handed to the client, and its stored SHA-256, the `SHA256SUMS.txt` inside a ZIP
+  bundle, and any attestation letter naming that report version all describe those
+  exact bytes. After excluding something, generate a new report version rather than
+  expecting an already-delivered download to have changed.
+- **"Findings needing attention" on the Reports tab.** Beside the readiness
+  checklist (and mirrored in the confirm before you generate), an advisory panel
+  lists the findings you have already marked **Ready to report** that the report
+  will nonetheless render incomplete: no linked evidence, no severity rating, no
+  remediation guidance, or — the one you cannot otherwise see — **every** linked
+  evidence item withheld from reports, so the finding ships with no evidence section
+  at all. Each row links straight to the finding. It is advisory only: it is not part
+  of the readiness checklist, does not move the readiness bar, and never blocks
+  generation. A finding now also reports how much of its evidence actually reaches
+  report output, and evidence withheld only because the capture it is linked to is
+  excluded is badged **Excluded from reports** on every surface — the timeline, the
+  evidence detail header, finding cards, and the evidence pickers — instead of
+  looking report-bound because its own box is unticked.
 - **Backup export.** Reports → Generate gets a **Backup export** card: a full JSON
   data export (every finding, evidence content embedded) for backups and transfers
   between servers, downloaded rather than recorded in report history. It is the only
@@ -101,7 +121,8 @@ with `pnpm run version:bump <major|minor|patch>`.
   opens. Initial focus also no longer lands on the ✕: a caller's `autoFocus` is
   honoured, otherwise the first control in the dialog body is focused, and focus
   returns to whatever opened the dialog when it closes. The same fix was applied to
-  `Popover`.
+  `Popover`. Both primitives are now covered by regression tests that run against a
+  real DOM and fail against the old focus behaviour.
 
 ## [0.9.0] - 2026-09-04
 

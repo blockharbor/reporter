@@ -40,6 +40,7 @@ import {
 } from '../components/evidence/DeleteEvidenceDialog.js';
 import {
   EXCLUDED_FROM_REPORT_HINT,
+  EXCLUDED_FROM_REPORT_INHERITED_HINT,
   ExcludedFromReportBadge,
 } from '../components/evidence/ExcludedFromReportBadge.js';
 import { LinkedGoalsSection } from '../components/goals/LinkedGoalsSection.js';
@@ -395,15 +396,10 @@ export function EvidenceDetailPage() {
             ) : (
               <ul className="flex flex-col gap-2">
                 {linkedList.map((c) => (
-                  // Exclusion is inherited: while this item is excluded, everything
-                  // linked under it is withheld from reports too, so each row says so
-                  // rather than looking report-bound.
-                  <EvidenceEntryRow
-                    key={c.uuid}
-                    slug={slug}
-                    ev={c}
-                    parentExcludedFromReport={excludeFromReport}
-                  />
+                  // Each row badges its own inherited exclusion from the serialized
+                  // `parentExcludedFromReport`, so nothing about this item's flag has
+                  // to be threaded down. Toggling it below invalidates this list.
+                  <EvidenceEntryRow key={c.uuid} slug={slug} ev={c} />
                 ))}
               </ul>
             )}
@@ -423,7 +419,11 @@ export function EvidenceDetailPage() {
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-text">Report</h3>
             <div className="flex items-center gap-2">
-              {excludeFromReport && <ExcludedFromReportBadge />}
+              {/* `excludeFromReport` rather than the serialized flag so the badge
+                  tracks the checkbox optimistically; inheritance can't change here. */}
+              {(excludeFromReport || evidence.parentExcludedFromReport) && (
+                <ExcludedFromReportBadge inherited={!excludeFromReport} />
+              )}
               {canWrite && <SaveStatusIndicator status={excludeStatus} />}
             </div>
           </div>
@@ -435,11 +435,24 @@ export function EvidenceDetailPage() {
             title={canWrite ? undefined : READ_ONLY_TITLE}
           />
           <p className="pl-6 text-xs text-muted">{EXCLUDED_FROM_REPORT_HINT}</p>
+          {/* Ticking the box is the moment someone wonders whether it reaches the
+              report they already sent. It doesn't: a generated report keeps the exact
+              bytes that were delivered, so say so here rather than only on the
+              Reports tab, where they may never look. */}
+          <p className="pl-6 text-xs text-muted">
+            Applies to reports generated from now on — reports already in the history keep the exact
+            bytes that were delivered.
+          </p>
           {excludeFromReport && (
             <p className="pl-6 text-xs text-muted">
               It stays visible here, in the timeline and on every finding it’s attached to, so you
               can include it again later.
             </p>
+          )}
+          {/* An unticked box on evidence that is withheld anyway needs explaining: it
+              is linked under an excluded capture, and the fix is on that capture. */}
+          {!excludeFromReport && evidence.parentExcludedFromReport && (
+            <p className="pl-6 text-xs text-muted">{EXCLUDED_FROM_REPORT_INHERITED_HINT}</p>
           )}
         </Card>
 

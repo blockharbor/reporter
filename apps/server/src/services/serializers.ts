@@ -140,8 +140,10 @@ type EvidenceWithRelations = DbEvidence & {
   /** The last editor (any field), when the evidence has been edited since creation. */
   lastEditedBy?: Pick<DbUser, 'slug' | 'firstName' | 'lastName'> | null;
   tags: { tag: DbTag }[];
-  /** Present when the include resolves the comment parent; used for parentEvidenceUuid. */
-  parent?: Pick<DbEvidence, 'uuid'> | null;
+  /** Present when the include resolves the comment parent; carries the parent's uuid
+   *  (for `parentEvidenceUuid`) and its report-exclusion flag, which is what makes
+   *  inherited exclusion visible to the client (`parentExcludedFromReport`). */
+  parent?: Pick<DbEvidence, 'uuid' | 'excludeFromReport'> | null;
   /** Present when the include counts comments (linked evidence) on this item. */
   _count?: { comments: number };
   /** The requesting user's pref only (see `evidenceInclude`); powers `starred`. */
@@ -182,6 +184,10 @@ export function serializeEvidence(e: EvidenceWithRelations, engagementSlug: stri
     commentCount: e._count?.comments ?? 0,
     starred: e.userPrefs?.[0]?.isFavorite ?? false,
     excludeFromReport: e.excludeFromReport,
+    // The inherited half of report exclusion, resolved server-side: only the server
+    // can see the parent's flag, and without it an item withheld purely by
+    // inheritance looks report-bound everywhere it is listed.
+    parentExcludedFromReport: e.parent?.excludeFromReport ?? false,
   };
 }
 
@@ -223,6 +229,15 @@ type FindingWithRelations = DbFinding & {
   category: FindingCategory | null;
   /** Link counts from the route's `findingInclude` (attached evidence, linked goals). */
   _count?: { evidence: number; goals: number };
+  /**
+   * The finding's evidence links already narrowed to the ones a report may show
+   * (`REPORT_VISIBLE_EVIDENCE`), loaded for their count alone — `numEvidenceInReport`
+   * is `.length`. Rows rather than a number because Prisma's `_count` can't alias a
+   * relation, so a filtered `evidence` count cannot sit beside the unfiltered one
+   * that `numEvidence` needs. Required, not optional: a caller that omitted it would
+   * silently report every finding's evidence as absent from the report.
+   */
+  evidence: { evidenceId: number }[];
 };
 
 export function serializeFinding(f: FindingWithRelations, engagementSlug: string): Finding {
@@ -245,6 +260,7 @@ export function serializeFinding(f: FindingWithRelations, engagementSlug: string
     readyToReport: f.readyToReport,
     position: f.position,
     numEvidence: f._count?.evidence ?? 0,
+    numEvidenceInReport: f.evidence.length,
     numGoals: f._count?.goals ?? 0,
     createdAt: f.createdAt.toISOString(),
     updatedAt: f.updatedAt.toISOString(),
@@ -265,8 +281,12 @@ export function evidenceInclude(userId: number) {
     lastEditedBy: { select: { slug: true, firstName: true, lastName: true } },
     tags: { include: { tag: true } },
     // Comment-linking: the parent (for `parentEvidenceUuid`) and the count of
-    // comments pointing at this item (for `commentCount`).
-    parent: { select: { uuid: true } },
+    // comments pointing at this item (for `commentCount`). The parent's
+    // `excludeFromReport` rides along because report exclusion is inherited, and
+    // this one include backs every surface that lists evidence — the Evidence tab,
+    // a finding's attached evidence, the evidence pickers — so resolving it here
+    // badges the inherited case everywhere at once.
+    parent: { select: { uuid: true, excludeFromReport: true } },
     _count: { select: { comments: true } },
     userPrefs: { where: { userId }, select: { isFavorite: true } },
   } as const;

@@ -426,13 +426,27 @@ model ReportSettings {
 }
 
 /**
- * The audit trail behind the Reports tab: one row per report document (PDF or
- * ZIP) generated for an engagement. Reports themselves render on demand and are
- * never stored, so this is deliberately lean — `version` is an auto-assigned
- * label (`v1.0`, `v2.0`, …) and `summary` is a JSON snapshot of the findings
- * tallies at generation time (shape: `reportSummarySchema` in @reporter/shared).
- * An attestation letter attests to one of these records so its stated results
- * stay consistent with the report even after the engagement's findings change.
+ * The audit trail behind the Reports tab: one row per report document (PDF, ZIP,
+ * or JSON) generated for an engagement, together with the rendered bytes. It
+ * records a deliverable rather than caching one — `version` is an auto-assigned
+ * label (`v1.0`, `v2.0`, …), `summary` is a JSON snapshot of the findings tallies
+ * at generation time (shape: `reportSummarySchema` in @reporter/shared) so an
+ * attestation letter issued later stays consistent with the report even after the
+ * engagement's findings change, and `blobKey` plus
+ * `filename`/`sizeBytes`/`contentType`/`sha256` describe the stored artifact.
+ *
+ * Those bytes are immutable by design: nothing rewrites or re-renders a stored
+ * artifact, so each one keeps the content — and the report exclusions — that were
+ * in force when it was generated. Three things point at them and an edit in place
+ * would make all three lie: `sha256` is taken over the exact bytes, a ZIP ships
+ * its own `supporting-files/SHA256SUMS.txt` inside itself, and an attestation
+ * letter attests to a named `version` and date, so rewriting "v1.0" would leave a
+ * signed letter attesting to a document that no longer exists. Retroactive
+ * redaction is not even detectable from here: a row references no evidence,
+ * persists no render options, and screenshots are re-encoded into the PDF stream,
+ * so withheld content leaves behind no uuid and no matching hash to search for.
+ * Flagging evidence `excludeFromReport` therefore governs future generations; the
+ * remedy for a report already sent is to generate a new version.
  */
 model GeneratedReport {
   id            Int      @id @default(autoincrement())

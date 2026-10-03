@@ -496,8 +496,9 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // --- Report history + attestation letters --------------------------------
-  // Every generated PDF/ZIP is logged (see recordReport); this is the audit
-  // trail the Reports tab shows and what gates the attestation letter.
+  // Every preset generation — PDF, ZIP and JSON alike — is logged (see
+  // recordReport); this is the audit trail the Reports tab shows. Only a PDF or a
+  // ZIP can be attested to (see findReportForLetter).
   app.get(
     '/engagements/:slug/reports/history',
     { preHandler: [requireAuth, requireEngagementRole('read')] },
@@ -515,9 +516,9 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
   // handed over, so it keeps the report exclusions that were in force when it was
   // generated. Excluding evidence today therefore does not redact yesterday's
   // PDF/ZIP, and nothing here rewrites stored bytes. That is a stated decision
-  // rather than an oversight — the Reports tab says so next to the history list,
-  // so an operator who has just excluded something knows to generate a fresh
-  // report instead of assuming the old download changed.
+  // rather than an oversight — both the Reports tab (next to the history list) and
+  // the evidence Report card say so, so an operator who has just excluded something
+  // knows to generate a fresh report instead of assuming the old download changed.
   app.get(
     '/engagements/:slug/reports/:uuid/download',
     { preHandler: [requireAuth, requireEngagementRole('read')] },

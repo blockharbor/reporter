@@ -339,6 +339,66 @@ describe('excludeFromReport keeps evidence in the app but out of every report ou
     expect(detail.excludeFromReport).toBe(true);
   });
 
+  it('counts only report-visible evidence in numEvidenceInReport', async () => {
+    const { cookie, finding, hidden } = await seedExcluded();
+    const findingJson = (url: string) =>
+      app.inject({ method: 'GET', url, headers: { ...WEB_HEADERS, cookie } }).then((r) => r.json());
+
+    const [listed] = await findingJson('/web/engagements/op1/findings');
+    // `numEvidence` keeps meaning "links", so the Findings page's has-evidence
+    // filter is unaffected; the report-visible subset is the separate number.
+    expect(listed.numEvidence).toBe(2);
+    expect(listed.numEvidenceInReport).toBe(1);
+
+    const detail = await findingJson(`/web/engagements/op1/findings/${finding.uuid}`);
+    expect(detail.numEvidence).toBe(2);
+    expect(detail.numEvidenceInReport).toBe(1);
+    // Both links are still served — the filtered count must not narrow the response.
+    expect(detail.evidence).toHaveLength(2);
+
+    // Un-excluding closes the gap, so the Reports tab's warning clears itself.
+    await app.inject({
+      method: 'PUT',
+      url: `/web/engagements/op1/evidence/${hidden.uuid}`,
+      headers: { ...WEB_HEADERS, cookie },
+      payload: { excludeFromReport: false },
+    });
+    const [relisted] = await findingJson('/web/engagements/op1/findings');
+    expect(relisted.numEvidenceInReport).toBe(2);
+  });
+
+  it('matches numEvidence on a finding with nothing excluded, including at create time', async () => {
+    const { users, eng, cookie } = await setup();
+    const ev = await makeEvidence(eng.id, users.writer.id, { title: 'Plain' });
+    const created = await app
+      .inject({
+        method: 'POST',
+        url: '/web/engagements/op1/findings',
+        headers: { ...WEB_HEADERS, cookie },
+        payload: { title: 'Clean', description: '', category: null },
+      })
+      .then((r) => r.json());
+    // A brand-new finding has no links at all, and the create route serializes the
+    // same shape as the list — so the field has to be 0, never undefined.
+    expect(created.numEvidenceInReport).toBe(0);
+
+    await app.inject({
+      method: 'POST',
+      url: `/web/engagements/op1/findings/${created.uuid}/evidence`,
+      headers: { ...WEB_HEADERS, cookie },
+      payload: { evidenceUuids: [ev.uuid] },
+    });
+    const [listed] = await app
+      .inject({
+        method: 'GET',
+        url: '/web/engagements/op1/findings',
+        headers: { ...WEB_HEADERS, cookie },
+      })
+      .then((r) => r.json());
+    expect(listed.numEvidence).toBe(1);
+    expect(listed.numEvidenceInReport).toBe(1);
+  });
+
   it('is toggled off and back on through the evidence update route', async () => {
     const { cookie, hidden } = await seedExcluded();
     const put = (excludeFromReport: boolean) =>
@@ -875,6 +935,41 @@ describe('report exclusion is inherited by linked evidence', () => {
     // asserting it has none.
     expect(html).not.toContain('No evidence attached.');
     expect(child.excludeFromReport).toBe(false); // the child's own flag is clear
+  });
+
+  it('discounts the child from numEvidenceInReport and badges it as inherited', async () => {
+    const { cookie, parent, child, finding } = await seedParentChild();
+    const get = (url: string) =>
+      app.inject({ method: 'GET', url, headers: { ...WEB_HEADERS, cookie } }).then((r) => r.json());
+
+    // The one case a naive `excludeFromReport: false` count gets wrong: the child's
+    // own flag is clear, yet the report shows nothing for this finding.
+    const [listed] = await get('/web/engagements/op1/findings');
+    expect(listed.numEvidence).toBe(1);
+    expect(listed.numEvidenceInReport).toBe(0);
+
+    // The finding page is where that warning deep-links to, so the row it lands on
+    // has to be able to say why the evidence is withheld.
+    const detail = await get(`/web/engagements/op1/findings/${finding.uuid}`);
+    expect(detail.numEvidenceInReport).toBe(0);
+    expect(detail.evidence).toHaveLength(1);
+    expect(detail.evidence[0]).toMatchObject({
+      uuid: child.uuid,
+      excludeFromReport: false,
+      parentExcludedFromReport: true,
+    });
+
+    // Same resolved state on the Evidence tab, which shares the one include.
+    const list = await get('/web/engagements/op1/evidence');
+    const row = (list.items as { uuid: string }[]).find((e) => e.uuid === child.uuid);
+    expect(row).toMatchObject({ excludeFromReport: false, parentExcludedFromReport: true });
+
+    // A top-level capture has no parent to inherit from, however excluded it is.
+    const parentRow = await get(`/web/engagements/op1/evidence/${parent.uuid}`);
+    expect(parentRow).toMatchObject({
+      excludeFromReport: true,
+      parentExcludedFromReport: false,
+    });
   });
 
   it('keeps the child out of a curated timeline subsection that includes comments', async () => {

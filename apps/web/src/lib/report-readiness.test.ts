@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { computeReadiness, type ReadinessInput } from './report-readiness.js';
+import {
+  computeFindingWarnings,
+  computeReadiness,
+  type FindingWarningSubject,
+  type ReadinessInput,
+} from './report-readiness.js';
 
 /** A fully-complete input; individual tests knock out one field at a time. */
 const complete: ReadinessInput = {
@@ -92,5 +97,93 @@ describe('computeReadiness', () => {
     expect(wm.na).toBe(true);
     expect(wm.satisfied).toBe(true);
     expect(r.ready).toBe(true);
+  });
+});
+
+/** A ready weakness with nothing wrong with it; each case breaks one thing. */
+const soundFinding: FindingWarningSubject = {
+  uuid: 'f-ok',
+  title: 'Unauthenticated diagnostic service',
+  kind: 'weakness',
+  readyToReport: true,
+  severity: 'high',
+  remediation: 'Require authentication on the diagnostic port.',
+  numEvidence: 3,
+  numEvidenceInReport: 3,
+};
+
+const kinds = (r: ReturnType<typeof computeFindingWarnings>) => r.groups.map((g) => g.kind);
+
+describe('computeFindingWarnings', () => {
+  it('says nothing about a sound finding', () => {
+    const r = computeFindingWarnings([soundFinding]);
+    expect(r.groups).toEqual([]);
+    expect(r.total).toBe(0);
+    expect(r.findingCount).toBe(0);
+  });
+
+  it('warns when every linked evidence item is withheld from the report', () => {
+    const r = computeFindingWarnings([{ ...soundFinding, numEvidence: 2, numEvidenceInReport: 0 }]);
+    expect(kinds(r)).toEqual(['evidenceAllWithheld']);
+    expect(r.groups[0]!.findings).toEqual([{ uuid: 'f-ok', title: soundFinding.title }]);
+  });
+
+  it('does not warn when only some evidence is withheld', () => {
+    // The report still renders an evidence section, and the finding page already
+    // badges the excluded items — warning here would be crying wolf.
+    const r = computeFindingWarnings([{ ...soundFinding, numEvidence: 3, numEvidenceInReport: 1 }]);
+    expect(r.groups).toEqual([]);
+  });
+
+  it('warns about no evidence, an unrated severity and a missing remediation', () => {
+    expect(
+      kinds(computeFindingWarnings([{ ...soundFinding, numEvidence: 0, numEvidenceInReport: 0 }])),
+    ).toEqual(['noEvidence']);
+    expect(kinds(computeFindingWarnings([{ ...soundFinding, severity: null }]))).toEqual([
+      'noSeverity',
+    ]);
+    // Whitespace is not remediation guidance.
+    expect(kinds(computeFindingWarnings([{ ...soundFinding, remediation: '  \n' }]))).toEqual([
+      'noRemediation',
+    ]);
+  });
+
+  it('reports every warning a single finding raises, counting the finding once', () => {
+    const r = computeFindingWarnings([
+      {
+        ...soundFinding,
+        numEvidence: 0,
+        numEvidenceInReport: 0,
+        severity: null,
+        remediation: '',
+      },
+    ]);
+    // Groups come back in FINDING_WARNING_KINDS order, not the order they fired.
+    expect(kinds(r)).toEqual(['noEvidence', 'noSeverity', 'noRemediation']);
+    expect(r.total).toBe(3);
+    expect(r.findingCount).toBe(1);
+  });
+
+  it('ignores findings the report will not render in full', () => {
+    const broken = { numEvidence: 0, numEvidenceInReport: 0, severity: null, remediation: '' };
+    const r = computeFindingWarnings([
+      // Not ready: still being written, so none of this is news to the author.
+      { ...soundFinding, uuid: 'f-draft', readyToReport: false, ...broken },
+      // A strength renders as one row of the Summary of Strengths table — no
+      // severity pill, no Remediation section, no evidence section to be empty.
+      { ...soundFinding, uuid: 'f-strength', kind: 'strength', ...broken },
+    ]);
+    expect(r.groups).toEqual([]);
+  });
+
+  it('groups several findings under one warning, in list order', () => {
+    const r = computeFindingWarnings([
+      { ...soundFinding, uuid: 'f-1', title: 'First', numEvidence: 0, numEvidenceInReport: 0 },
+      soundFinding,
+      { ...soundFinding, uuid: 'f-2', title: 'Second', numEvidence: 0, numEvidenceInReport: 0 },
+    ]);
+    expect(kinds(r)).toEqual(['noEvidence']);
+    expect(r.groups[0]!.findings.map((f) => f.uuid)).toEqual(['f-1', 'f-2']);
+    expect(r.findingCount).toBe(2);
   });
 });

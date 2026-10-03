@@ -1,10 +1,19 @@
 /**
  * Report history: the audit trail behind the Reports tab. Every time a report
- * document (PDF or ZIP) is generated we record a `GeneratedReport` row — the
- * report itself isn't stored (it renders on demand), but the row snapshots the
- * findings tallies so an attestation letter issued later stays consistent with
- * the report as generated. Recording is best-effort: callers wrap it so a
- * history hiccup never fails the actual download.
+ * document (PDF, ZIP or JSON) is generated we record a `GeneratedReport` row *and*
+ * store the rendered bytes, so the row is the deliverable rather than a pointer at
+ * one — `sha256` is taken over exactly the buffer that was sent to the client, and
+ * the row also snapshots the findings tallies so an attestation letter issued later
+ * stays consistent with the report as generated.
+ *
+ * Nothing here ever rewrites a stored artifact. Re-downloading a past version
+ * replays those bytes, which is what makes later changes — editing a finding,
+ * flagging evidence `excludeFromReport` — stop at the next generation instead of
+ * retroactively altering what was delivered. See `model GeneratedReport` in
+ * `schema.prisma` for the rest of that reasoning.
+ *
+ * Recording is best-effort: callers wrap it so a history hiccup never fails the
+ * actual download.
  */
 import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
