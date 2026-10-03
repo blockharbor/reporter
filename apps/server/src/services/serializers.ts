@@ -135,7 +135,8 @@ export function serializeReportSettings(s: DbReportSettings): ReportSettings {
 }
 
 type EvidenceWithRelations = DbEvidence & {
-  operator: Pick<DbUser, 'slug' | 'firstName' | 'lastName'>;
+  /** The capturing operator, or null once that user has been deleted. */
+  operator: Pick<DbUser, 'slug' | 'firstName' | 'lastName'> | null;
   /** The last editor (any field), when the evidence has been edited since creation. */
   lastEditedBy?: Pick<DbUser, 'slug' | 'firstName' | 'lastName'> | null;
   tags: { tag: DbTag }[];
@@ -151,11 +152,15 @@ export function serializeEvidence(e: EvidenceWithRelations, engagementSlug: stri
   return {
     uuid: e.uuid,
     engagementSlug,
-    operator: {
-      slug: e.operator.slug,
-      firstName: e.operator.firstName,
-      lastName: e.operator.lastName,
-    },
+    // Null once the capturing user has been deleted — the evidence is the client
+    // deliverable and outlives its author, so never fabricate an identity here.
+    operator: e.operator
+      ? {
+          slug: e.operator.slug,
+          firstName: e.operator.firstName,
+          lastName: e.operator.lastName,
+        }
+      : null,
     title: e.title,
     description: e.description,
     contentType: e.contentType as Evidence['contentType'],
@@ -176,6 +181,7 @@ export function serializeEvidence(e: EvidenceWithRelations, engagementSlug: stri
     parentEvidenceUuid: e.parent?.uuid ?? null,
     commentCount: e._count?.comments ?? 0,
     starred: e.userPrefs?.[0]?.isFavorite ?? false,
+    excludeFromReport: e.excludeFromReport,
   };
 }
 
@@ -183,12 +189,15 @@ export function serializeEvidence(e: EvidenceWithRelations, engagementSlug: stri
  *  changed after posting; the create handler pins created == updated so this is a
  *  clean strict comparison. */
 export function serializeEvidenceComment(
-  c: DbEvidenceComment & { author: Pick<DbUser, 'slug' | 'firstName' | 'lastName'> },
+  c: DbEvidenceComment & { author: Pick<DbUser, 'slug' | 'firstName' | 'lastName'> | null },
 ): EvidenceComment {
   return {
     uuid: c.uuid,
     body: c.body,
-    author: { slug: c.author.slug, firstName: c.author.firstName, lastName: c.author.lastName },
+    // Null once the authoring user has been deleted; the comment itself stays.
+    author: c.author
+      ? { slug: c.author.slug, firstName: c.author.firstName, lastName: c.author.lastName }
+      : null,
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),
     edited: c.updatedAt.getTime() > c.createdAt.getTime(),
@@ -212,7 +221,8 @@ export function serializeFindingEvidence(
 
 type FindingWithRelations = DbFinding & {
   category: FindingCategory | null;
-  _count?: { evidence: number };
+  /** Link counts from the route's `findingInclude` (attached evidence, linked goals). */
+  _count?: { evidence: number; goals: number };
 };
 
 export function serializeFinding(f: FindingWithRelations, engagementSlug: string): Finding {
@@ -235,7 +245,9 @@ export function serializeFinding(f: FindingWithRelations, engagementSlug: string
     readyToReport: f.readyToReport,
     position: f.position,
     numEvidence: f._count?.evidence ?? 0,
+    numGoals: f._count?.goals ?? 0,
     createdAt: f.createdAt.toISOString(),
+    updatedAt: f.updatedAt.toISOString(),
   };
 }
 

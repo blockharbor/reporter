@@ -14,9 +14,11 @@ import {
   serializeFindingEvidence,
 } from '../../services/serializers.js';
 
+// Every finding read (list + detail) carries its link counts: attached evidence and
+// linked goals. The Findings page filters/sorts on both, client-side.
 const findingInclude = {
   category: true,
-  _count: { select: { evidence: true } },
+  _count: { select: { evidence: true, goals: true } },
 } as const;
 
 async function categoryIdFor(
@@ -149,9 +151,7 @@ export async function findingRoutes(app: FastifyInstance): Promise<void> {
         remediation: body.remediation ?? undefined,
         readyToReport: body.readyToReport ?? undefined,
         categoryId:
-          body.category === undefined
-            ? undefined
-            : await categoryIdFor(app, eng.id, body.category),
+          body.category === undefined ? undefined : await categoryIdFor(app, eng.id, body.category),
       };
 
       // Severity / CVSS resolution:

@@ -18,6 +18,7 @@ import {
 import { useAuth } from '../../auth.js';
 import { READ_ONLY_TITLE } from '../../lib/permissions.js';
 import { formatDateTime, formatRelative } from '../../lib/format.js';
+import { userDisplayName } from '../../lib/user-display.js';
 
 /**
  * A flat, chronological discussion thread on a piece of evidence — plain notes,
@@ -55,7 +56,8 @@ export function EvidenceCommentsCard({
   return (
     <Card className="space-y-3 p-4">
       <h3 className="text-sm font-semibold text-text">
-        Comments {comments.length > 0 && <span className="font-normal text-muted">({comments.length})</span>}
+        Comments{' '}
+        {comments.length > 0 && <span className="font-normal text-muted">({comments.length})</span>}
       </h3>
 
       {query.isLoading ? (
@@ -66,13 +68,15 @@ export function EvidenceCommentsCard({
         <p className="text-sm text-muted">No comments yet. Add a note for the team below.</p>
       ) : (
         <ul className="flex flex-col gap-3">
+          {/* An anonymized comment (its author was deleted) is nobody's to edit —
+              the server refuses the edit too, so no one gets the controls. */}
           {comments.map((c) => (
             <CommentRow
               key={c.uuid}
               slug={slug}
               uuid={uuid}
               comment={c}
-              canEdit={canWrite && user?.slug === c.author.slug}
+              canEdit={canWrite && c.author !== null && user?.slug === c.author.slug}
             />
           ))}
         </ul>
@@ -80,14 +84,14 @@ export function EvidenceCommentsCard({
 
       {canWrite ? (
         <div className="space-y-2 border-t border-border pt-3">
-          <MarkdownField
-            value={draft}
-            onChange={setDraft}
-            rows={3}
-            placeholder="Add a comment…"
-          />
+          <MarkdownField value={draft} onChange={setDraft} rows={3} placeholder="Add a comment…" />
           <div className="flex justify-end">
-            <Button size="sm" onClick={() => void submit()} loading={add.isPending} disabled={!draft.trim()}>
+            <Button
+              size="sm"
+              onClick={() => void submit()}
+              loading={add.isPending}
+              disabled={!draft.trim()}
+            >
               Comment
             </Button>
           </div>
@@ -155,10 +159,11 @@ function CommentRow({
     <li className="rounded-input border border-border bg-surface-2 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
         <span>
-          <span className="font-medium text-text">
-            {comment.author.firstName} {comment.author.lastName}
+          <span className={comment.author ? 'font-medium text-text' : 'font-medium text-muted'}>
+            {userDisplayName(comment.author)}
           </span>{' '}
-          · <span title={formatDateTime(comment.createdAt)}>{formatRelative(comment.createdAt)}</span>
+          ·{' '}
+          <span title={formatDateTime(comment.createdAt)}>{formatRelative(comment.createdAt)}</span>
           {comment.edited && <span title={formatDateTime(comment.updatedAt)}> · edited</span>}
         </span>
         {canEdit && !editing && (
@@ -166,7 +171,11 @@ function CommentRow({
             <button type="button" onClick={startEdit} className="text-muted hover:text-text">
               Edit
             </button>
-            <button type="button" onClick={() => void remove()} className="text-muted hover:text-danger">
+            <button
+              type="button"
+              onClick={() => void remove()}
+              className="text-muted hover:text-danger"
+            >
               Delete
             </button>
           </span>
@@ -185,7 +194,12 @@ function CommentRow({
             >
               Cancel
             </Button>
-            <Button size="sm" onClick={() => void save()} loading={updateComment.isPending} disabled={!draft.trim()}>
+            <Button
+              size="sm"
+              onClick={() => void save()}
+              loading={updateComment.isPending}
+              disabled={!draft.trim()}
+            >
               Save
             </Button>
           </div>

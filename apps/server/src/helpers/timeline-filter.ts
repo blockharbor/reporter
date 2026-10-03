@@ -22,6 +22,8 @@ export function buildEvidenceWhere(
     and.push({ tags: { some: { tag: { name: tagName, engagementId } } } });
   }
 
+  // Evidence whose operator has been deleted (operator_id NULL) matches no slug and so
+  // drops out — correct, since this filter asks for a named operator.
   if (q.operators.length > 0) {
     and.push({ operator: { slug: { in: q.operators } } });
   }
@@ -63,5 +65,8 @@ export function buildEvidenceWhere(
     and.push({ parentEvidenceId: null });
   }
 
+  // `excludeFromReport` is deliberately not filtered here: evidence excluded from the
+  // report stays fully visible in the app (badged) so it can be un-excluded. Only
+  // report output — the PDF, the supporting-files ZIP, the JSON export — applies it.
   return { AND: and };
 }

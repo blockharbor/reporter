@@ -10,9 +10,11 @@
 import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import {
+  DELETED_USER_LABEL,
   EVIDENCE_GROUPING_LABELS,
   EVIDENCE_TYPE_LABELS,
   FINDINGS_EXPORT_VERSION,
+  FINDINGS_EXPORT_VERSION_WITHOUT_EXCLUSIONS,
   FIX_EFFORT_LABELS,
   GOAL_STATUS_LABELS,
   REPORT_SECTION_LABELS,
@@ -46,6 +48,7 @@ import {
 } from '@reporter/shared';
 import { evidenceContentMime } from '../routes/shared-evidence.js';
 import { buildEvidenceWhere } from '../helpers/timeline-filter.js';
+import { REPORT_VISIBLE_EVIDENCE } from '../helpers/report-visibility.js';
 import { fetchGoalsTree, progressFromTree } from './goals.js';
 import { getReportSettings } from './report-settings.js';
 import {
@@ -72,6 +75,21 @@ interface GatheredEvidence {
   caption: string;
   /** Which bucket the link is in: Attack Path (true) vs Attached Evidence (false). */
   inPath: boolean;
+  /**
+   * The evidence's *effective* report exclusion: its own flag, or its parent's
+   * when it is linked evidence hanging off an excluded capture (see
+   * {@link REPORT_VISIBLE_EVIDENCE} for why exclusion is inherited). False for
+   * everything a `report-safe` gather returns (that scope filters excluded
+   * evidence out in the query); only a `full-backup` gather — the JSON export's
+   * explicit opt-in — can return `true` here.
+   *
+   * It is the effective value rather than the stored column because this is what
+   * an export writes, and an import can only restore it onto the row itself: the
+   * export carries no parent links, so an inherited exclusion would otherwise be
+   * lost on restore and the evidence would re-enter reports on the target server.
+   * See {@link EvidenceScope}.
+   */
+  excludeFromReport: boolean;
 }
 
 interface GatheredFinding {
@@ -92,6 +110,19 @@ interface GatheredFinding {
   readyToReport: boolean;
   position: number;
   evidence: GatheredEvidence[];
+  /**
+   * How many of the finding's evidence links `gather` dropped because the
+   * evidence is flagged `excludeFromReport`. When this is non-zero `evidence` is
+   * a partial view of the finding, so the report must stay silent about evidence
+   * rather than assert the finding has none — see {@link renderFinding}.
+   *
+   * It is a count of what was *filtered out*, not of what is flagged: a
+   * `full-backup` gather filters nothing, so it reports 0 even though the
+   * evidence it returns may be flagged. That is the value the one consumer
+   * needs — "nothing is missing from this list" — and it leaves the PDF path's
+   * behaviour unchanged, since the PDF only ever gathers `report-safe`.
+   */
+  excludedEvidenceCount: number;
 }
 
 export interface ReportOptions {
@@ -144,7 +175,42 @@ export interface ReportOptions {
 export interface JsonExportOptions extends ReportOptions {
   /** Embed evidence blob content as base64 (makes the export portable). */
   includeEvidenceContent?: boolean;
+  /**
+   * Opt in to exporting evidence flagged `excludeFromReport`, with the flag set,
+   * so the JSON file is a complete backup of the findings: an export → import
+   * round trip restores the evidence *and* its exclusion instead of dropping it.
+   *
+   * Default (and the only thing any other code path can produce) is off, in which
+   * case excluded evidence never leaves the server. This option lives here, on the
+   * JSON-export options only, and NOT on {@link ReportOptions} — see
+   * {@link EvidenceScope} for why that separation is load-bearing.
+   */
+  includeExcludedEvidence?: boolean;
 }
+
+/**
+ * Which evidence a {@link gather} call is allowed to load:
+ *
+ * - `report-safe` — evidence the report may not show ({@link
+ *   REPORT_VISIBLE_EVIDENCE}) is dropped in the query, so its title/description/
+ *   blob key are never even read. Every report output (PDF, supporting-files ZIP,
+ *   Files Attached table, timeline subsections, Evidence Log, cover counts, goal
+ *   coverage) and the default JSON export.
+ * - `full-backup` — excluded evidence is loaded and carries `excludeFromReport:
+ *   true`. Reachable only from {@link buildFindingsExport} when the caller
+ *   explicitly set `includeExcludedEvidence`.
+ *
+ * This is a separate parameter of `gather` rather than a field on
+ * {@link ReportOptions} on purpose. `ReportOptions` objects are built once per
+ * request and handed around (`reportOptionsFromQuery`, `reportOptionsFromConfig`,
+ * `reportFor`, report history), and `JsonExportOptions extends ReportOptions`, so
+ * a field there could ride along into {@link buildReportHtml} or
+ * {@link computeReportSummary} and quietly widen a PDF. A PDF caller cannot
+ * express the scope at all: it passes options and nothing else, and the default
+ * is `report-safe`. The safety invariant is therefore a property of the
+ * signatures, not of a convention someone has to remember.
+ */
+type EvidenceScope = 'report-safe' | 'full-backup';
 
 interface EngagementRef {
   id: number;
@@ -152,11 +218,18 @@ interface EngagementRef {
   name: string;
 }
 
-/** Load the report's findings (filtered + ordered) with their ordered evidence. */
+/**
+ * Load the report's findings (filtered + ordered) with their ordered evidence.
+ *
+ * `scope` decides whether report-excluded evidence is readable at all; it
+ * deliberately is not part of `opts` (see {@link EvidenceScope}) and defaults to
+ * the safe value, so every caller that just passes options gets the filtered view.
+ */
 async function gather(
   app: FastifyInstance,
   eng: EngagementRef,
   opts: ReportOptions,
+  scope: EvidenceScope = 'report-safe',
 ): Promise<GatheredFinding[]> {
   const findings = await app.db.finding.findMany({
     where: { engagementId: eng.id, ...(opts.includeAll ? {} : { readyToReport: true }) },
@@ -164,10 +237,23 @@ async function gather(
       category: true,
       // Attack Path first (inPath=true), then Attached Evidence, each ordered by
       // its own position. The export/report split the flat list back by `inPath`.
+      //
+      // Evidence the report may not show is dropped here, in the query, so its
+      // title/description/blob key are never even loaded. This single query feeds
+      // both the PDF's finding blocks and the JSON export, so one filter keeps the
+      // exclusion honored in both — only an explicit `full-backup` scope lifts it.
       evidence: {
+        ...(scope === 'report-safe' ? { where: { evidence: REPORT_VISIBLE_EVIDENCE } } : {}),
         orderBy: [{ inPath: 'desc' }, { position: 'asc' }, { evidenceId: 'asc' }],
-        include: { evidence: true },
+        // The parent's flag comes along so the gathered item can state its
+        // *effective* exclusion (see `GatheredEvidence.excludeFromReport`); no
+        // render path reads it, only the export.
+        include: { evidence: { include: { parent: { select: { excludeFromReport: true } } } } },
       },
+      // The unfiltered link count, so `excludedEvidenceCount` below is exact
+      // without loading the excluded rows we just refused to read. (Under
+      // `full-backup` it equals the rows loaded, so that count comes out 0.)
+      _count: { select: { evidence: true } },
     },
     orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
   });
@@ -189,6 +275,7 @@ async function gather(
     cvssScore: f.cvssScore,
     readyToReport: f.readyToReport,
     position: f.position,
+    excludedEvidenceCount: f._count.evidence - f.evidence.length,
     evidence: f.evidence.map((link) => ({
       uuid: link.evidence.uuid,
       title: link.evidence.title,
@@ -200,6 +287,8 @@ async function gather(
       fullBlobKey: link.evidence.fullBlobKey,
       caption: link.caption,
       inPath: link.inPath,
+      excludeFromReport:
+        link.evidence.excludeFromReport || (link.evidence.parent?.excludeFromReport ?? false),
     })),
   }));
 }
@@ -270,13 +359,35 @@ export async function computeReportSummary(
 // JSON export (report.json) — also the import envelope
 // ---------------------------------------------------------------------------
 
+/**
+ * Build the portable JSON export — the findings and their linked evidence (not
+ * the whole engagement: goals, tags, report content and unlinked evidence stay
+ * behind). Two modes, picked by `opts.includeExcludedEvidence`:
+ *
+ * - default — a report-shaped export: report-excluded evidence is filtered out by
+ *   `gather` and never leaves the server, exactly like the PDF. The envelope says
+ *   so (`includesExcludedEvidence: false`) so an importer knows the file is a
+ *   filtered view and must not treat it as the whole truth about a finding's
+ *   evidence — see `importFindings`.
+ * - opt-in — a complete backup of the findings: excluded evidence is included and
+ *   states `excludeFromReport: true`, so importing the file elsewhere restores
+ *   both the evidence and its exclusion.
+ */
 export async function buildFindingsExport(
   app: FastifyInstance,
   eng: EngagementRef,
   exportedAt: Date,
   opts: JsonExportOptions,
 ): Promise<FindingsExport> {
-  const findings = await gather(app, eng, opts);
+  // The single place the backup scope is reachable from: an explicit option on the
+  // JSON-export options, translated here into the `gather` parameter no
+  // report-rendering caller can pass.
+  const findings = await gather(
+    app,
+    eng,
+    opts,
+    opts.includeExcludedEvidence ? 'full-backup' : 'report-safe',
+  );
 
   const out: FindingsExport['findings'] = [];
   for (const f of findings) {
@@ -292,6 +403,12 @@ export async function buildFindingsExport(
         occurredAt: e.occurredAt.toISOString(),
         caption: e.caption,
         inPath: e.inPath,
+        // The effective exclusion. Under the default scope `gather` has already
+        // dropped every excluded item, so this is false throughout; under the
+        // opt-in backup scope it is the real value, and `true` is how
+        // `importFindings` knows to re-exclude the evidence it recreates rather
+        // than re-admitting it to every report output.
+        excludeFromReport: e.excludeFromReport,
       };
       if (opts.includeEvidenceContent && e.fullBlobKey) {
         const buf = await app.blobs.getBuffer(e.fullBlobKey).catch(() => null);
@@ -320,11 +437,31 @@ export async function buildFindingsExport(
     });
   }
 
+  // Whether this file is allowed to describe report-excluded evidence. Two
+  // readers depend on it:
+  //
+  // - `importFindings`, to decide which finding links the file may detach. A
+  //   default export is a *filtered* view, so it must not be read as "these are
+  //   all the links this finding has".
+  // - an older server, which doesn't know the field at all — hence the version
+  //   stamp below.
+  const carriesExcludedEvidence = out.some((f) => f.evidence.some((e) => e.excludeFromReport));
+
   return {
-    schemaVersion: FINDINGS_EXPORT_VERSION,
+    // Only a file that actually carries report-excluded evidence is stamped with
+    // the newer version. A pre-exclusion server accepts `schemaVersion <= 3` and
+    // strips the `excludeFromReport` field it has never heard of, so importing
+    // such a file there would silently re-admit the evidence to its reports;
+    // stamping 4 makes it fail loudly instead. Every other export — including an
+    // opted-in backup of an engagement that happens to have nothing excluded —
+    // stays at 3 and keeps importing on older servers.
+    schemaVersion: carriesExcludedEvidence
+      ? FINDINGS_EXPORT_VERSION
+      : FINDINGS_EXPORT_VERSION_WITHOUT_EXCLUSIONS,
     exportedAt: exportedAt.toISOString(),
     engagement: { slug: eng.slug, name: eng.name },
     includesEvidenceContent: Boolean(opts.includeEvidenceContent),
+    includesExcludedEvidence: Boolean(opts.includeExcludedEvidence),
     findings: out,
   };
 }
@@ -352,8 +489,18 @@ function tagChip(name: string, colorName: string): string {
 
 /** Format a date as e.g. "August 18, 2026" (UTC, locale-independent). */
 const MONTHS = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
 ];
 export function longDate(d: Date | null | undefined): string {
   if (!d) return '—';
@@ -379,14 +526,31 @@ interface Budget {
   remaining: number;
 }
 
+/**
+ * The fields {@link renderEvidence} actually reads — a structural subset of
+ * {@link GatheredEvidence}, so the evidence log (whose items are
+ * {@link TimelineEvidence}) can render a body without inventing values for the
+ * fields it doesn't have. In particular it never has to claim a value for
+ * `excludeFromReport`, which only the gather queries are entitled to decide —
+ * and whose value now depends on the gather's {@link EvidenceScope}, so a render
+ * path reading it would be reading an answer to a question it didn't ask.
+ */
+type RenderableEvidence = Pick<
+  GatheredEvidence,
+  'title' | 'description' | 'contentType' | 'contentSubtype' | 'fullBlobKey'
+>;
+
 /** Render one piece of evidence to HTML, loading its blob if needed. */
 async function renderEvidence(
   app: FastifyInstance,
-  e: GatheredEvidence,
+  e: RenderableEvidence,
   budget: Budget,
 ): Promise<string> {
   const caption = esc(
-    e.title || e.description || EVIDENCE_TYPE_LABELS[e.contentType as EvidenceType] || e.contentType,
+    e.title ||
+      e.description ||
+      EVIDENCE_TYPE_LABELS[e.contentType as EvidenceType] ||
+      e.contentType,
   );
 
   // Never read a terminal recording — casts can be large and can't render
@@ -495,6 +659,11 @@ async function renderFinding(
 ): Promise<string> {
   // Split into the two buckets. `gather` already orders Attack Path first, each
   // bucket by its own position, so filtering preserves the intended order.
+  //
+  // Report-excluded evidence is already absent from `f.evidence`, so the Attack
+  // Path steps below are numbered off these positions and therefore renumber
+  // contiguously (Step 1, Step 2, …). That is deliberate: leaving a gap where an
+  // excluded step used to be would advertise the omission to the client.
   const pathEvidence = f.evidence.filter((e) => e.inPath);
   const attachedEvidence = f.evidence.filter((e) => !e.inPath);
 
@@ -539,9 +708,13 @@ async function renderFinding(
   }
   const attachedHtml = showAttached
     ? `<h4 class="sub">Attached Evidence (${attachedEvidence.length})</h4>${attachedParts.join('\n')}`
-    : // Only claim "no evidence" when the finding genuinely has none — not when a
-      // section toggle hid it.
-      pathEvidence.length === 0 && attachedEvidence.length === 0
+    : // Only claim "no evidence" when the finding genuinely has none. Two things
+      // can empty the buckets while the finding does have evidence: a section
+      // toggle hiding a bucket, or `gather` dropping evidence flagged
+      // `excludeFromReport`. In both cases the invariant is the same — the report
+      // prints nothing, because "No evidence attached." would be a false statement
+      // in a signed client deliverable.
+      pathEvidence.length === 0 && attachedEvidence.length === 0 && f.excludedEvidenceCount === 0
       ? '<p class="pp muted">No evidence attached.</p>'
       : '';
 
@@ -562,6 +735,16 @@ async function renderFinding(
       ${pathHtml}
       ${attachedHtml}
     </div>`;
+}
+
+/**
+ * Operator (capturer) display name for the evidence log's `who` label. A deleted
+ * user gets the shared stand-in — the report names the gap rather than inventing a
+ * name — while `Unknown` stays the fallback for a live user with blank names.
+ */
+function operatorLabel(operator: { firstName: string; lastName: string } | null): string {
+  if (!operator) return DELETED_USER_LABEL;
+  return `${operator.firstName} ${operator.lastName}`.trim() || 'Unknown';
 }
 
 interface TimelineEvidence {
@@ -597,18 +780,13 @@ async function renderTimelineItem(
   const body = await renderEvidence(
     app,
     {
-      uuid: e.uuid,
       // Title/description render as the item's heading + snippet above, so the
       // embedded body caption falls back to the content-type label.
       title: '',
       description: '',
       contentType: e.contentType,
       contentSubtype: e.contentSubtype,
-      originalFilename: null,
-      occurredAt: e.occurredAt,
       fullBlobKey: e.fullBlobKey,
-      caption: '',
-      inPath: false,
     },
     budget,
   );
@@ -635,7 +813,8 @@ async function renderTimeline(
   budget: Budget,
   show: EvidenceMetaVisibility,
 ): Promise<string> {
-  if (items.length === 0) return '<p class="pp muted">No evidence recorded for this engagement.</p>';
+  if (items.length === 0)
+    return '<p class="pp muted">No evidence recorded for this engagement.</p>';
 
   if (group === 'chronological') {
     const parts: string[] = [];
@@ -746,7 +925,17 @@ export async function gatherSupportingFiles(
   eng: { id: number },
 ): Promise<SupportingFileMeta[]> {
   const rows = await app.db.evidence.findMany({
-    where: { engagementId: eng.id, contentType: { not: 'image' }, fullBlobKey: { not: null } },
+    where: {
+      engagementId: eng.id,
+      contentType: { not: 'image' },
+      fullBlobKey: { not: null },
+      // This is the path an exclusion leaks hardest on: it sweeps the whole
+      // engagement (not just finding-linked evidence) and ships raw bytes in the
+      // ZIP plus a SHA-256 in the Files Attached table, so excluded evidence must
+      // never make it into the set — including linked evidence whose parent is
+      // excluded, which this sweep would otherwise ship on its own.
+      ...REPORT_VISIBLE_EVIDENCE,
+    },
     orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
     select: {
       uuid: true,
@@ -1027,7 +1216,9 @@ function renderScopeCoverage(targets: Target[], progress: EngagementProgress): s
     for (const a of t.activities) {
       const actLabel = `${esc(a.name)}${a.category ? ` <span class="muted">· ${esc(a.category)}</span>` : ''}`;
       if (a.goals.length === 0) {
-        rows.push(`<tr><td class="title">${actLabel}</td><td class="muted">No goals defined</td><td>—</td><td class="num">—</td></tr>`);
+        rows.push(
+          `<tr><td class="title">${actLabel}</td><td class="muted">No goals defined</td><td>—</td><td class="num">—</td></tr>`,
+        );
         continue;
       }
       for (const g of a.goals) {
@@ -1079,7 +1270,12 @@ async function gatherSubsectionTimeline(
   };
   const where = buildEvidenceWhere(parsed, engagementId, userId);
   const rows = await app.db.evidence.findMany({
-    where,
+    // The report-only exclusion is layered on here rather than inside
+    // `buildEvidenceWhere`: that helper is shared with the interactive Evidence
+    // tab, where excluded evidence deliberately stays visible (badged) so it can
+    // be un-excluded. Both halves are nested in one `AND` so neither can shadow
+    // the other's top-level `OR`.
+    where: { AND: [where, REPORT_VISIBLE_EVIDENCE] },
     include: { tags: { include: { tag: true } }, operator: true },
     orderBy: { occurredAt: 'asc' },
   });
@@ -1091,7 +1287,7 @@ async function gatherSubsectionTimeline(
     contentSubtype: e.contentSubtype,
     occurredAt: e.occurredAt,
     fullBlobKey: e.fullBlobKey,
-    operatorName: `${e.operator.firstName} ${e.operator.lastName}`.trim() || 'Unknown',
+    operatorName: operatorLabel(e.operator),
     tags: e.tags.map((t) => ({ name: t.tag.name, colorName: t.tag.colorName })),
   }));
 }
@@ -1129,9 +1325,13 @@ async function renderExecutionNarrative(
     const evParts: string[] = [];
     for (const ref of sub.evidence) {
       const ev = evidenceByUuid.get(ref.evidenceUuid);
-      if (!ev) continue; // dangling ref — the evidence was deleted
+      // Unresolved ref: the evidence was deleted, or it is excluded from report
+      // output (the caller's lookup only loads included items). Either way the
+      // figure is dropped and the narrative prose stands on its own — the caption
+      // goes with it, so nothing hints at the omission.
+      if (!ev) continue;
       const cap = ref.caption?.trim() ? `<p class="step-caption">${esc(ref.caption)}</p>` : '';
-      const evHtml = await renderEvidence(app, { ...ev, caption: '' }, budget);
+      const evHtml = await renderEvidence(app, ev, budget);
       evParts.push(`<div class="step">${cap}${evHtml}</div>`);
     }
     const evHtml = evParts.length ? `<div class="path">${evParts.join('\n')}</div>` : '';
@@ -1148,6 +1348,11 @@ export async function buildReportHtml(
   /** The report's author; resolves per-user filters (e.g. a timeline subsection's
    *  "starred only"). Always the requesting user on the web report routes. */
   userId: number,
+  /** The supporting-file set, when the caller already computed it (the ZIP route
+   *  needs the same list for its archive entries, and hashing twice is wasteful).
+   *  It MUST come from {@link gatherSupportingFiles}: this list is printed verbatim
+   *  in the "Files Attached" table, so it is the one report input whose report
+   *  exclusions are the caller's responsibility rather than this function's. */
   precomputedFiles?: SupportingFileMeta[],
 ): Promise<string> {
   // Narrative is the default Assessment Execution view; the auto timeline is opt-in.
@@ -1207,9 +1412,7 @@ export async function buildReportHtml(
   for (const f of weaknesses) counts[f.severity ?? 'none']++;
   const scored = weaknesses.filter((f) => f.cvssScore != null);
   const highestCvss = scored.reduce((m, f) => Math.max(m, f.cvssScore!), 0);
-  const avgCvss = scored.length
-    ? scored.reduce((s, f) => s + f.cvssScore!, 0) / scored.length
-    : 0;
+  const avgCvss = scored.length ? scored.reduce((s, f) => s + f.cvssScore!, 0) / scored.length : 0;
   const rated = scored.length;
 
   const budget: Budget = { remaining: TOTAL_EMBED_CAP };
@@ -1279,12 +1482,20 @@ export async function buildReportHtml(
   const previewKey = opts.previewSectionKey;
   const isPreview = previewKey !== undefined;
   const effectiveEntries: ReportSectionEntry[] = isPreview
-    ? [{ key: previewKey!, enabled: true, options: sectionEntries.find((s) => s.key === previewKey)?.options }]
+    ? [
+        {
+          key: previewKey!,
+          enabled: true,
+          options: sectionEntries.find((s) => s.key === previewKey)?.options,
+        },
+      ]
     : sectionEntries;
 
   // Load the goals tree only when the coverage section is actually enabled.
   const wantCoverage = effectiveEntries.some((s) => s.key === 'scopeCoverage' && s.enabled);
-  const coverageTargets: Target[] = wantCoverage ? await fetchGoalsTree(app, eng.id) : [];
+  const coverageTargets: Target[] = wantCoverage
+    ? await fetchGoalsTree(app, eng.id, { forReport: true })
+    : [];
   const coverageProgress: EngagementProgress = progressFromTree(coverageTargets);
 
   // Section 01 is always Engagement Details; content sections number from 02 in
@@ -1340,8 +1551,11 @@ export async function buildReportHtml(
           .join('')
       : '<div class="person"><div class="rl muted">No team members recorded.</div></div>';
 
+  // Quoted twice (the Engagement Details grid and the Executive Summary stats
+  // strip), so it must count what the report can actually show: report-excluded
+  // evidence is left out rather than tallied as present-but-missing.
   const totalEvidenceCount = await app.db.evidence.count({
-    where: { engagementId: eng.id, parentEvidenceId: null },
+    where: { engagementId: eng.id, parentEvidenceId: null, excludeFromReport: false },
   });
 
   const providerCell = providerContacts.some((c) => c.name.trim() || c.email.trim())
@@ -1451,9 +1665,21 @@ export async function buildReportHtml(
     : `<p class="pp">This assessment followed a structured, evidence-driven methodology: reconnaissance and scoping, active testing against the in-scope surface, verification and impact analysis of each issue, and consolidation of results into the prioritized findings that follow. Every finding is supported by the captured evidence recorded during the engagement.</p>`;
 
   const bands: { sev: Severity; range: string; desc: string }[] = [
-    { sev: 'critical', range: '9.0 – 10.0', desc: 'Immediate risk; likely leads to full compromise. Remediate urgently.' },
-    { sev: 'high', range: '7.0 – 8.9', desc: 'Serious risk; significant impact or ease of exploitation. Prioritize.' },
-    { sev: 'medium', range: '4.0 – 6.9', desc: 'Moderate risk; meaningful impact, often requiring specific conditions.' },
+    {
+      sev: 'critical',
+      range: '9.0 – 10.0',
+      desc: 'Immediate risk; likely leads to full compromise. Remediate urgently.',
+    },
+    {
+      sev: 'high',
+      range: '7.0 – 8.9',
+      desc: 'Serious risk; significant impact or ease of exploitation. Prioritize.',
+    },
+    {
+      sev: 'medium',
+      range: '4.0 – 6.9',
+      desc: 'Moderate risk; meaningful impact, often requiring specific conditions.',
+    },
     { sev: 'low', range: '0.1 – 3.9', desc: 'Limited risk; minor impact or difficult to exploit.' },
     { sev: 'none', range: '0.0', desc: 'Informational; no direct security impact.' },
   ];
@@ -1504,7 +1730,12 @@ export async function buildReportHtml(
         if (partOn('scope')) parts.push(scopeHtml);
         if (partOn('severity')) parts.push(severityBlock);
         if (partOn('stats')) parts.push(statsStrip);
-        rendered.push({ kicker: 'Overview', title: 'Executive Summary', tocTitle: 'Executive Summary', inner: parts.join('') });
+        rendered.push({
+          kicker: 'Overview',
+          title: 'Executive Summary',
+          tocTitle: 'Executive Summary',
+          inner: parts.join(''),
+        });
         break;
       }
       case 'assessmentFindings': {
@@ -1514,11 +1745,21 @@ export async function buildReportHtml(
         if (partOn('recommendations')) parts.push(renderRecommendationsTable(recommendations));
         if (partOn('categories')) parts.push(categoryTable);
         if (partOn('standards')) parts.push(renderStandardsTraceability(traceItems));
-        rendered.push({ kicker: 'Summary', title: 'Assessment Findings', tocTitle: 'Assessment Findings', inner: parts.join('') });
+        rendered.push({
+          kicker: 'Summary',
+          title: 'Assessment Findings',
+          tocTitle: 'Assessment Findings',
+          inner: parts.join(''),
+        });
         break;
       }
       case 'methodology':
-        rendered.push({ kicker: 'Approach', title: 'Methodology & Approach', tocTitle: 'Methodology & Approach', inner: methodologyInner });
+        rendered.push({
+          kicker: 'Approach',
+          title: 'Methodology & Approach',
+          tocTitle: 'Methodology & Approach',
+          inner: methodologyInner,
+        });
         break;
       case 'threatModel':
         if (hasThreatModel) {
@@ -1548,7 +1789,14 @@ export async function buildReportHtml(
           const evidenceByUuid = new Map<string, GatheredEvidence>();
           if (refUuids.length) {
             const rows = await app.db.evidence.findMany({
-              where: { engagementId: eng.id, uuid: { in: refUuids } },
+              // An excluded item simply doesn't resolve, and `renderExecutionNarrative`
+              // already skips refs it can't resolve (the dangling-ref case), so the
+              // narrative prose stays intact minus that figure.
+              where: {
+                engagementId: eng.id,
+                uuid: { in: refUuids },
+                ...REPORT_VISIBLE_EVIDENCE,
+              },
               select: {
                 uuid: true,
                 title: true,
@@ -1558,6 +1806,7 @@ export async function buildReportHtml(
                 originalFilename: true,
                 occurredAt: true,
                 fullBlobKey: true,
+                excludeFromReport: true,
               },
             });
             for (const r of rows) {
@@ -1572,6 +1821,7 @@ export async function buildReportHtml(
                 fullBlobKey: r.fullBlobKey,
                 caption: '',
                 inPath: false,
+                excludeFromReport: r.excludeFromReport,
               });
             }
           }
@@ -1589,7 +1839,7 @@ export async function buildReportHtml(
         let timelineHtml = '';
         if (includeTimeline) {
           const evidence = await app.db.evidence.findMany({
-            where: { engagementId: eng.id, parentEvidenceId: null },
+            where: { engagementId: eng.id, parentEvidenceId: null, excludeFromReport: false },
             include: { tags: { include: { tag: true } }, operator: true },
             orderBy: { occurredAt: 'asc' },
           });
@@ -1601,7 +1851,7 @@ export async function buildReportHtml(
             contentSubtype: e.contentSubtype,
             occurredAt: e.occurredAt,
             fullBlobKey: e.fullBlobKey,
-            operatorName: `${e.operator.firstName} ${e.operator.lastName}`.trim() || 'Unknown',
+            operatorName: operatorLabel(e.operator),
             tags: e.tags.map((t) => ({ name: t.tag.name, colorName: t.tag.colorName })),
           }));
           const groupLabel = EVIDENCE_GROUPING_LABELS[evidenceGroup];
@@ -1746,7 +1996,10 @@ html, body { background: #fff; }
     </section>`;
 
   const bodySections = numbered
-    .map((r) => `<section class="section">${sectionHead(r.num, r.kicker, r.title)}${r.inner}</section>`)
+    .map(
+      (r) =>
+        `<section class="section">${sectionHead(r.num, r.kicker, r.title)}${r.inner}</section>`,
+    )
     .join('\n');
 
   // Running-header text (baked into the @page margin boxes).
@@ -1757,8 +2010,9 @@ html, body { background: #fff; }
   const wmText = engagement.watermarkText?.trim() || 'CONFIDENTIAL';
   const wmColor = engagement.watermarkColor || '#64748b';
   const wmOpacity =
-    WATERMARK_OPACITY_VALUES[engagement.watermarkOpacity as keyof typeof WATERMARK_OPACITY_VALUES] ??
-    WATERMARK_OPACITY_VALUES.medium;
+    WATERMARK_OPACITY_VALUES[
+      engagement.watermarkOpacity as keyof typeof WATERMARK_OPACITY_VALUES
+    ] ?? WATERMARK_OPACITY_VALUES.medium;
   const wmLayer = engagement.watermarkLayer === 'front' ? 'front' : 'behind';
   // Scale the font so the rotated word always fits the page (no clipping).
   const wmFontSize = watermarkFontSize(wmText);
@@ -1789,7 +2043,9 @@ ${FONT_LINKS}
 /** A numbered section header (mono number + condensed kicker + heavy title). */
 function sectionHead(num: string, kicker: string, title: string, noRule = false): string {
   const rule = noRule ? ' style="border-top:0;padding-top:0"' : '';
-  const numHtml = num ? `<span class="sec-num">${esc(num)}</span>` : '<span class="sec-num"></span>';
+  const numHtml = num
+    ? `<span class="sec-num">${esc(num)}</span>`
+    : '<span class="sec-num"></span>';
   return `<div class="sec-head"${rule}>
     <div class="sec-kicker">${esc(kicker)}</div>
     ${numHtml}

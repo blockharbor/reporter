@@ -29,7 +29,7 @@ import {
   type EngagementStatus,
   type ImportDraft,
 } from '@reporter/shared';
-import { slugify } from '../lib/slugify.js';
+import { slugify, slugifyDraft } from '../lib/slugify.js';
 import { formatDate, fromDateInput } from '../lib/format.js';
 import {
   useCreateEngagement,
@@ -92,8 +92,7 @@ function compareBy(column: SortColumn, direction: SortDirection) {
       case 'endDate': {
         // Sort on the same value the End column renders: actual end when set,
         // else projected end, else 0 (no end date sinks to the bottom).
-        const endOf = (e: Engagement) =>
-          new Date(e.actualEndAt ?? e.projectedEndAt ?? 0).getTime();
+        const endOf = (e: Engagement) => new Date(e.actualEndAt ?? e.projectedEndAt ?? 0).getTime();
         return dir * (endOf(a) - endOf(b));
       }
       case 'progress':
@@ -464,7 +463,9 @@ function EngagementsTable({
                 {eng.actualEndAt ? (
                   <span className="text-muted">{formatDate(eng.actualEndAt)}</span>
                 ) : eng.projectedEndAt ? (
-                  <span className="text-muted/70">{formatDate(eng.projectedEndAt)} (projected)</span>
+                  <span className="text-muted/70">
+                    {formatDate(eng.projectedEndAt)} (projected)
+                  </span>
                 ) : (
                   <span className="text-muted">—</span>
                 )}
@@ -499,9 +500,11 @@ function CreateEngagementModal({ open, onClose }: { open: boolean; onClose: () =
   const [slugTouched, setSlugTouched] = useState(false);
   const [projectedEndAt, setProjectedEndAt] = useState('');
   // Optional proposal to import right after creation.
-  const [proposal, setProposal] = useState<{ draft: ImportDraft; raw: unknown; fileName: string } | null>(
-    null,
-  );
+  const [proposal, setProposal] = useState<{
+    draft: ImportDraft;
+    raw: unknown;
+    fileName: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!open) {
@@ -513,11 +516,17 @@ function CreateEngagementModal({ open, onClose }: { open: boolean; onClose: () =
     }
   }, [open]);
 
+  // What the field shows: the lenient draft once the user takes the slug over,
+  // otherwise a finalized preview derived from the name.
   const effectiveSlug = slugTouched ? slug : slugify(name);
+  // What actually leaves the browser. The draft deliberately tolerates a trailing
+  // hyphen (see lib/slugify.ts), which slugSchema rejects, so finalize once more
+  // here — this covers submitting via keyboard without the field ever blurring.
+  const slugForSubmit = slugify(effectiveSlug);
 
   // The create modal can't call useImportProposal(slug) before the slug exists, so
   // POST the import directly against the created engagement's slug.
-  const importAfterCreate = useImportProposal(effectiveSlug);
+  const importAfterCreate = useImportProposal(slugForSubmit);
 
   async function onProposalFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -543,11 +552,11 @@ function CreateEngagementModal({ open, onClose }: { open: boolean; onClose: () =
     try {
       await create.mutateAsync({
         name,
-        slug: effectiveSlug,
+        slug: slugForSubmit,
         projectedEndAt: fromDateInput(projectedEndAt),
       });
       // If a proposal was attached, import it (replace + apply metadata) into the
-      // brand-new engagement. Its own hook is bound to `effectiveSlug`.
+      // brand-new engagement. Its own hook is bound to `slugForSubmit`.
       if (proposal) {
         try {
           const r = await importAfterCreate.mutateAsync({
@@ -589,7 +598,7 @@ function CreateEngagementModal({ open, onClose }: { open: boolean; onClose: () =
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button onClick={submit} loading={busy} disabled={!name || !effectiveSlug}>
+          <Button onClick={submit} loading={busy} disabled={!name || !slugForSubmit}>
             Create
           </Button>
         </>
@@ -605,7 +614,10 @@ function CreateEngagementModal({ open, onClose }: { open: boolean; onClose: () =
             value={effectiveSlug}
             onChange={(e) => {
               setSlugTouched(true);
-              setSlug(slugify(e.target.value));
+              setSlug(slugifyDraft(e.target.value));
+            }}
+            onBlur={() => {
+              if (slugTouched) setSlug(slugify(slug));
             }}
           />
         </Field>

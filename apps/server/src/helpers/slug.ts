@@ -1,11 +1,21 @@
-/** Turn an arbitrary name into a URL-safe slug (lowercase, hyphen-separated). */
+/**
+ * Turn an arbitrary name into a URL-safe slug (lowercase, hyphen-separated).
+ * Mirrors `slugify` in `apps/web/src/lib/slugify.ts` — keep the two in sync.
+ *
+ * The trailing-hyphen strip must run *after* the 64-character cap, not as part of
+ * one leading-and-trailing pass before it: truncating a longer name can land a
+ * separator in the last position, and `slugSchema` rejects a trailing hyphen. That
+ * is reachable through `uniqueSlug` below, which slugifies the engagement name
+ * whenever the client doesn't supply a slug of its own.
+ */
 export function slugify(input: string): string {
   return input
     .toLowerCase()
     .normalize('NFKD')
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
+    .replace(/^-+/, '')
+    .slice(0, 64)
+    .replace(/-+$/, '');
 }
 
 /**

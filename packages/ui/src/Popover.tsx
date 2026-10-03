@@ -42,32 +42,60 @@ export function Popover({
   const triggerRef = useRef<HTMLElement>(null);
   const panelId = useId();
 
+  /**
+   * Latest-value ref. Lets the effect below depend on [open] alone: callers may
+   * hand over a fresh callback on every render (an inline arrow, or a ternary
+   * that swaps it when the trigger is disabled).
+   */
+  const onOpenChangeRef = useRef(onOpenChange);
+  useEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  }, [onOpenChange]);
+
+  // Esc + outside-click close, and focus handling. [open] must stay the *only*
+  // dependency: this effect moves focus on open and on close, so re-running it
+  // on an ordinary re-render would steal the caret from a control inside the
+  // panel — an input in a popover would accept exactly one character. Do not
+  // widen this array; `onOpenChange` is read through the ref above.
   useEffect(() => {
     if (!open) return;
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onOpenChange(false);
+      if (e.key === 'Escape') onOpenChangeRef.current(false);
     };
     const onPointerDown = (e: MouseEvent) => {
       if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
-        onOpenChange(false);
+        onOpenChangeRef.current(false);
       }
     };
 
     document.addEventListener('keydown', onKey);
     document.addEventListener('mousedown', onPointerDown);
 
-    // Focus the first focusable element inside the panel on open.
-    const first = panelRef.current?.querySelector<HTMLElement>(FOCUSABLE);
-    first?.focus();
+    // Focus the first focusable element inside the panel on open, unless the
+    // content already claimed focus. React never renders the `autofocus`
+    // attribute — it calls .focus() while committing — so a caller's
+    // `autoFocus` shows up as focus already being inside the panel.
+    const panel = panelRef.current;
+    const explicit = panel?.querySelector<HTMLElement>('[data-autofocus], [autofocus]');
+    if (explicit) {
+      explicit.focus();
+    } else if (panel && !panel.contains(document.activeElement)) {
+      panel.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+    }
 
     return () => {
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('mousedown', onPointerDown);
-      // Return focus to the trigger when the popover closes.
+      // Return focus to the trigger when the popover closes — but only if the
+      // unmounting panel is what dropped it (the browser hands focus back to
+      // <body>). A click that landed on something else outside already moved
+      // focus deliberately.
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement) return;
       triggerRef.current?.focus();
     };
-  }, [open, onOpenChange]);
+  }, [open]);
 
   const typedTrigger = trigger as ReactElement<TriggerInjectedProps>;
   const existingOnClick = typedTrigger.props.onClick;

@@ -25,11 +25,17 @@ const EMPTY_QUERY: ParsedQuery = {
   sortAsc: false,
 };
 
-/** The distinct operators present on the current page (a fallback filter source). */
+/**
+ * The distinct operators present on the current page (a fallback filter source).
+ * Anonymized evidence (its operator was deleted) contributes nobody — there is no
+ * identity left to filter by, and the rows themselves stay in the timeline.
+ */
 function operatorsFromItems(items: Evidence[]): EvidenceOperator[] {
   const bySlug = new Map<string, EvidenceOperator>();
-  for (const ev of items)
+  for (const ev of items) {
+    if (!ev.operator) continue;
     if (!bySlug.has(ev.operator.slug)) bySlug.set(ev.operator.slug, ev.operator);
+  }
   return [...bySlug.values()];
 }
 

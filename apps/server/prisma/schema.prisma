@@ -79,6 +79,12 @@ model User {
   admin     Boolean   @default(false)
   disabled  Boolean   @default(false)
   headless  Boolean   @default(false)
+  /**
+   * Legacy soft-delete marker. Deleting a user is now a hard delete (the row is
+   * really removed and its evidence is anonymized), so this only ever shadows rows
+   * soft-deleted by the old endpoint; the auth guards still check it so those rows
+   * stay locked out.
+   */
   deletedAt DateTime? @map("deleted_at")
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
@@ -460,7 +466,10 @@ model Evidence {
   id             Int      @id @default(autoincrement())
   uuid           String   @unique @default(uuid())
   engagementId    Int      @map("engagement_id")
-  operatorId     Int      @map("operator_id")
+  // Who captured this evidence. Null means that user was deleted: the evidence is
+  // the client deliverable and outlives its author, so the row survives the delete
+  // (ON DELETE SET NULL) and every display site renders "Deleted user".
+  operatorId     Int?     @map("operator_id")
   // Short label for the evidence — the primary heading in lists, cards, and the
   // report. Backfilled from the old description on the title migration; required
   // on new evidence at the API/UI layer.
@@ -491,10 +500,13 @@ model Evidence {
   // Who last edited any field of this evidence (null until first edit). Distinct
   // from `operatorId`, which is always the original capturer.
   lastEditedById Int?     @map("last_edited_by_id")
+  /** When true this evidence is omitted from every report output — the PDF, the
+      supporting-files ZIP and the JSON export. It stays fully visible in the app. */
+  excludeFromReport Boolean @default(false) @map("exclude_from_report")
 
   engagement Engagement          @relation(fields: [engagementId], references: [id], onDelete: Cascade)
-  operator  User               @relation("EvidenceOperator", fields: [operatorId], references: [id])
-  lastEditedBy User?            @relation("EvidenceLastEditor", fields: [lastEditedById], references: [id])
+  operator  User?              @relation("EvidenceOperator", fields: [operatorId], references: [id], onDelete: SetNull)
+  lastEditedBy User?            @relation("EvidenceLastEditor", fields: [lastEditedById], references: [id], onDelete: SetNull)
   parent    Evidence?          @relation("EvidenceComments", fields: [parentEvidenceId], references: [id], onDelete: SetNull)
   comments  Evidence[]         @relation("EvidenceComments")
   // Plain-text discussion comments (the user-facing "Comments"), distinct from the
@@ -517,13 +529,15 @@ model EvidenceComment {
   id         Int      @id @default(autoincrement())
   uuid       String   @unique @default(uuid())
   evidenceId Int      @map("evidence_id")
-  authorId   Int      @map("author_id")
+  // Who wrote the comment. Null means that user was deleted — the comment stays on
+  // the evidence thread and the UI renders its author as "Deleted user".
+  authorId   Int?     @map("author_id")
   body       String
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   evidence Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
-  author   User     @relation(fields: [authorId], references: [id])
+  author   User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
 
   @@index([evidenceId, createdAt])
   @@map("evidence_comments")

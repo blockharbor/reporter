@@ -8,10 +8,7 @@ import {
 } from '@reporter/shared';
 import { HttpError, requireAuth, requireEngagementRole } from '../../auth/guards.js';
 import { serializeEngagement, serializeUser } from '../../services/serializers.js';
-import {
-  computeEngagementProgress,
-  computeOneEngagementProgress,
-} from '../../services/goals.js';
+import { computeEngagementProgress, computeOneEngagementProgress } from '../../services/goals.js';
 
 export async function engagementRoutes(app: FastifyInstance): Promise<void> {
   // List the engagements the user is a member of — for everyone, site admins
@@ -142,8 +139,7 @@ export async function engagementRoutes(app: FastifyInstance): Promise<void> {
       if (body.providerContacts !== undefined) data.providerContacts = body.providerContacts;
       if (body.clientContacts !== undefined) data.clientContacts = body.clientContacts;
       if (body.softwareTested !== undefined) data.softwareTested = body.softwareTested;
-      if (body.thirdPartySoftware !== undefined)
-        data.thirdPartySoftware = body.thirdPartySoftware;
+      if (body.thirdPartySoftware !== undefined) data.thirdPartySoftware = body.thirdPartySoftware;
       // Watermark. Text/color clear to null (renderer then uses its defaults);
       // enabled/opacity/layer are set directly.
       if (body.watermarkEnabled !== undefined) data.watermarkEnabled = body.watermarkEnabled;
@@ -231,7 +227,10 @@ export async function engagementRoutes(app: FastifyInstance): Promise<void> {
       const { slug } = req.params as { slug: string };
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
       const roles = await app.db.userEngagementRole.findMany({
-        where: { engagementId: eng.id },
+        // Deleting a user is a hard delete, which takes its roles with it; the
+        // `deletedAt` filter only hides rows the old soft-delete left behind, which
+        // deployed databases still carry.
+        where: { engagementId: eng.id, user: { deletedAt: null } },
         include: { user: true },
       });
       return roles.map((r) => ({ user: serializeUser(r.user), role: r.role }));
@@ -246,8 +245,9 @@ export async function engagementRoutes(app: FastifyInstance): Promise<void> {
       const body = addEngagementMemberInput.parse(req.body);
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
       // Emails are unique but may be stored mixed-case; match case-insensitively.
+      // A legacy soft-deleted account must not be re-addable as a member.
       const target = await app.db.user.findFirst({
-        where: { email: { equals: body.email, mode: 'insensitive' } },
+        where: { email: { equals: body.email, mode: 'insensitive' }, deletedAt: null },
       });
       if (!target) throw new HttpError(404, `No user found with the email “${body.email}”`);
       await app.db.userEngagementRole.upsert({

@@ -68,6 +68,8 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
   // Distinct operators who have evidence in this engagement (powers the operator filter).
   // Declared before the `:uuid` handler so intent is clear; find-my-way also prioritizes
   // the static `operators` segment over the `:uuid` param.
+  // Driven from `users`, so a deleted operator drops out rather than arriving as a null
+  // entry — their anonymized evidence stays in the timeline, just no longer filterable.
   app.get(
     '/engagements/:slug/evidence/operators',
     { preHandler: [requireAuth, requireEngagementRole('read')] },
@@ -248,6 +250,8 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
         select: { id: true, authorId: true },
       });
       if (!existing) throw new HttpError(404, 'Comment not found');
+      // `authorId` is null once that user has been deleted, so this also (correctly)
+      // refuses: an anonymized comment is nobody's to edit.
       if (existing.authorId !== req.authedUser!.id) {
         throw new HttpError(403, 'You can only edit your own comments.');
       }
@@ -272,6 +276,7 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
         select: { id: true, authorId: true },
       });
       if (!existing) throw new HttpError(404, 'Comment not found');
+      // As with the edit above, a null (deleted) author matches nobody.
       if (existing.authorId !== req.authedUser!.id) {
         throw new HttpError(403, 'You can only delete your own comments.');
       }
@@ -280,8 +285,9 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // Update title / description / tags / occurredAt, and optionally re-parent the
-  // evidence (attach/move/detach its comment link) via `parentEvidenceUuid`.
+  // Update title / description / tags / occurredAt / report exclusion, and optionally
+  // re-parent the evidence (attach/move/detach its comment link) via
+  // `parentEvidenceUuid`.
   app.put(
     '/engagements/:slug/evidence/:uuid',
     { preHandler: [requireAuth, requireEngagementRole('write')] },
@@ -312,7 +318,8 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       if (editingContent && !EDITABLE_TEXT_TYPES.has(ev.contentType)) {
         throw new HttpError(400, "This evidence type's content can't be edited.");
       }
-      let blobPatch: { fullBlobKey: string | null; sha256: string | null; sizeBytes: number | null } | undefined;
+      let blobPatch:
+        { fullBlobKey: string | null; sha256: string | null; sizeBytes: number | null } | undefined;
       if (editingContent) {
         const text = body.content ?? '';
         if (text === '') {
@@ -375,7 +382,12 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
             title: body.title ?? undefined,
             description: body.description ?? undefined,
             occurredAt: body.occurredAt ? new Date(body.occurredAt) : undefined,
-            // Record who made this edit (any field), which also bumps updatedAt.
+            // Hide from / re-include in every report output; absent leaves it as it is.
+            // The evidence itself stays fully visible in the app either way.
+            excludeFromReport: body.excludeFromReport,
+            // Record who made this edit (any field), which also bumps updatedAt. That
+            // includes a bare `excludeFromReport` toggle: deciding what the client does
+            // and does not see is exactly what an audit trail should record.
             lastEditedById: req.authedUser!.id,
             // Only re-link when the field was present (value may be null for detach).
             ...(reparent ? { parentEvidenceId } : {}),

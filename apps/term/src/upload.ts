@@ -30,6 +30,9 @@ export async function uploadCast(
       tagIds: meta.tagIds,
       occurredAt: new Date().toISOString(),
       parentEvidenceUuid: meta.parentEvidenceUuid,
+      // Recordings are captured to be reported on; exclusion is a later editorial
+      // call, made in the web UI on the evidence itself.
+      excludeFromReport: false,
     },
     { filename: basename(castPath), contentType: 'application/x-asciicast', data },
   );

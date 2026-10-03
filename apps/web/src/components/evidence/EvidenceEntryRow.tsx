@@ -4,6 +4,8 @@ import { EVIDENCE_TYPE_LABELS, type Evidence } from '@reporter/shared';
 import { useToggleEvidenceStar } from '../../api/hooks.js';
 import { evidenceHeading, evidenceSnippet } from '../../lib/evidence-label.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
+import { userDisplayName } from '../../lib/user-display.js';
+import { ExcludedFromReportBadge } from './ExcludedFromReportBadge.js';
 import { TimestampRail } from './TimestampRail.js';
 
 const TYPE_ICON: Record<string, string> = {
@@ -39,7 +41,19 @@ function StarButton({ slug, ev }: { slug: string; ev: Evidence }) {
 }
 
 /** One evidence entry in the daily-journal list. The row content links to detail. */
-export function EvidenceEntryRow({ slug, ev }: { slug: string; ev: Evidence }) {
+export function EvidenceEntryRow({
+  slug,
+  ev,
+  parentExcludedFromReport = false,
+}: {
+  slug: string;
+  ev: Evidence;
+  /** Set when this row is rendered under a parent that is excluded from reports:
+   *  exclusion is inherited, so the row is withheld too even though its own flag
+   *  is clear. Only the caller that already holds the parent can know this — the
+   *  evidence payload carries the parent's uuid, not its flag. */
+  parentExcludedFromReport?: boolean;
+}) {
   const extraTags = ev.tags.length - 4;
   return (
     <li className="flex items-start gap-3 rounded-card border border-border bg-surface p-3 transition-colors hover:border-accent/50">
@@ -68,9 +82,10 @@ export function EvidenceEntryRow({ slug, ev }: { slug: string; ev: Evidence }) {
           )}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
             <Badge tone="neutral">{EVIDENCE_TYPE_LABELS[ev.contentType]}</Badge>
-            <span>
-              {ev.operator.firstName} {ev.operator.lastName}
-            </span>
+            {(ev.excludeFromReport || parentExcludedFromReport) && (
+              <ExcludedFromReportBadge inherited={!ev.excludeFromReport} />
+            )}
+            <span>{userDisplayName(ev.operator)}</span>
             {ev.parentEvidenceUuid && (
               <span
                 className="inline-flex items-center gap-1"

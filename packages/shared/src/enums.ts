@@ -30,6 +30,25 @@ export type EngagementRole = z.infer<typeof engagementRoleSchema>;
 /** Ordered from most to least privileged; used for `requireEngagementRole` checks. */
 export const ROLE_RANK: Record<EngagementRole, number> = { admin: 3, write: 2, read: 1 };
 
+/**
+ * Stand-in name for a user who has been deleted. Deleting a user is a hard delete,
+ * but the evidence and comments they authored survive it (the evidence is the
+ * client deliverable), so `operator` / `author` go null and every surface — web,
+ * and the generated report — renders this instead. One definition so the web UI
+ * and the PDF never disagree about what a vanished author is called.
+ */
+export const DELETED_USER_LABEL = 'Deleted user';
+
+/**
+ * Why a user cannot be deleted (or demoted / disabled). The server raises these as
+ * its 400 message and the Admin panel shows the same string as the disabled
+ * button's tooltip, so they live here: if the two ever drifted, the UI would
+ * explain the refusal differently from the request that was actually refused.
+ */
+export const CANNOT_DELETE_SELF = 'You cannot delete yourself';
+export const LAST_ADMIN_REASON =
+  'This is the last admin who can sign in — promote another user to admin first.';
+
 export const ENGAGEMENT_STATUSES = ['active', 'complete', 'archived'] as const;
 export const engagementStatusSchema = z.enum(ENGAGEMENT_STATUSES);
 export type EngagementStatus = z.infer<typeof engagementStatusSchema>;
@@ -243,7 +262,8 @@ export const REPORT_SECTION_LABELS: Record<ReportSection, string> = {
 /** Short hint shown under each toggle in the Reports configurator. */
 export const REPORT_SECTION_HINTS: Record<ReportSection, string> = {
   executiveSummary: 'Summary prose, scope, severity distribution and key stats.',
-  assessmentFindings: 'Strengths/weaknesses summary tables, recommendations, standards traceability.',
+  assessmentFindings:
+    'Strengths/weaknesses summary tables, recommendations, standards traceability.',
   methodology: 'The methodology narrative (or a sensible default).',
   threatModel: 'Threat-model narrative and diagrams (only renders when present).',
   assessmentExecution: 'Hand-authored execution narrative and optional evidence log.',
@@ -274,16 +294,48 @@ export interface ReportSectionItem {
 export const REPORT_SECTION_ITEMS: Partial<Record<ReportSection, ReportSectionItem[]>> = {
   executiveSummary: [
     { key: 'summary', label: 'Summary prose', sample: 'Your written executive-summary narrative.' },
-    { key: 'scope', label: 'Scope', sample: 'Service-scope targets and exclusions (or the scope prose).' },
-    { key: 'severity', label: 'Severity distribution', sample: 'The severity bar and per-severity count cards.' },
-    { key: 'stats', label: 'Key stats', sample: 'Weaknesses, highest/average CVSS, evidence count, and window.' },
+    {
+      key: 'scope',
+      label: 'Scope',
+      sample: 'Service-scope targets and exclusions (or the scope prose).',
+    },
+    {
+      key: 'severity',
+      label: 'Severity distribution',
+      sample: 'The severity bar and per-severity count cards.',
+    },
+    {
+      key: 'stats',
+      label: 'Key stats',
+      sample: 'Weaknesses, highest/average CVSS, evidence count, and window.',
+    },
   ],
   assessmentFindings: [
-    { key: 'strengths', label: 'Strengths table', sample: 'Summary table of security strengths (S1, S2, …).' },
-    { key: 'weaknesses', label: 'Weaknesses table', sample: 'Summary table of weaknesses with severity and fix effort.' },
-    { key: 'recommendations', label: 'Strategic recommendations', sample: 'Numbered high-level recommendations (R1, R2, …).' },
-    { key: 'categories', label: 'Category breakdown', sample: 'Weakness counts grouped by category.' },
-    { key: 'standards', label: 'Standards traceability', sample: 'Findings mapped to ISO/SAE 21434 and UN R155.' },
+    {
+      key: 'strengths',
+      label: 'Strengths table',
+      sample: 'Summary table of security strengths (S1, S2, …).',
+    },
+    {
+      key: 'weaknesses',
+      label: 'Weaknesses table',
+      sample: 'Summary table of weaknesses with severity and fix effort.',
+    },
+    {
+      key: 'recommendations',
+      label: 'Strategic recommendations',
+      sample: 'Numbered high-level recommendations (R1, R2, …).',
+    },
+    {
+      key: 'categories',
+      label: 'Category breakdown',
+      sample: 'Weakness counts grouped by category.',
+    },
+    {
+      key: 'standards',
+      label: 'Standards traceability',
+      sample: 'Findings mapped to ISO/SAE 21434 and UN R155.',
+    },
   ],
   threatModel: [
     { key: 'narrative', label: 'Narrative', sample: 'The threat-model narrative prose.' },
@@ -291,16 +343,44 @@ export const REPORT_SECTION_ITEMS: Partial<Record<ReportSection, ReportSectionIt
   ],
   detailedFindings: [
     { key: 'impact', label: 'Impact', sample: 'The impact statement on each weakness.' },
-    { key: 'standards', label: 'Standards mapping', sample: 'Per-finding ISO/SAE 21434 and UN R155 references.' },
+    {
+      key: 'standards',
+      label: 'Standards mapping',
+      sample: 'Per-finding ISO/SAE 21434 and UN R155 references.',
+    },
     { key: 'remediation', label: 'Remediation', sample: 'Remediation guidance on each weakness.' },
-    { key: 'recommendations', label: 'Related recommendations', sample: 'Strategic recommendations linked to each finding (R1, R3, …).' },
-    { key: 'attackPath', label: 'Attack path', sample: 'The ordered, captioned attack-path steps.' },
-    { key: 'attachedEvidence', label: 'Attached evidence', sample: 'Non-path evidence attached to each finding.' },
+    {
+      key: 'recommendations',
+      label: 'Related recommendations',
+      sample: 'Strategic recommendations linked to each finding (R1, R3, …).',
+    },
+    {
+      key: 'attackPath',
+      label: 'Attack path',
+      sample: 'The ordered, captioned attack-path steps.',
+    },
+    {
+      key: 'attachedEvidence',
+      label: 'Attached evidence',
+      sample: 'Non-path evidence attached to each finding.',
+    },
   ],
   supportingInformation: [
-    { key: 'softwareTested', label: 'Client software tested', sample: 'Table of in-scope client software and versions.' },
-    { key: 'thirdParty', label: 'Test tools used', sample: 'Table of test tools used — 3rd-party software, hardware, etc. — with versions.' },
-    { key: 'filesAttached', label: 'Files attached', sample: 'Supporting files with SHA-256 hashes.' },
+    {
+      key: 'softwareTested',
+      label: 'Client software tested',
+      sample: 'Table of in-scope client software and versions.',
+    },
+    {
+      key: 'thirdParty',
+      label: 'Test tools used',
+      sample: 'Table of test tools used — 3rd-party software, hardware, etc. — with versions.',
+    },
+    {
+      key: 'filesAttached',
+      label: 'Files attached',
+      sample: 'Supporting files with SHA-256 hashes.',
+    },
   ],
 };
 

@@ -173,6 +173,9 @@ export function CreateEvidenceModal({
       content: needsText ? content : undefined,
       contentSubtype: type === 'codeblock' && language ? language : undefined,
       parentEvidenceUuid,
+      // New evidence is always report-eligible. Excluding it is a deliberate,
+      // reversible call made afterwards from the evidence's own Report card.
+      excludeFromReport: false,
     };
     try {
       await create.mutateAsync({ metadata, file: needsFile && file ? file : undefined });

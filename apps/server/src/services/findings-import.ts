@@ -6,7 +6,9 @@
  * stealing another engagement's data. Evidence is matched by uuid: an existing
  * item is re-linked, an embedded item (contentBase64) is recreated with its
  * original uuid, and a reference-only item with no local copy is skipped. A
- * finding's evidence links are reconciled to exactly the file's set.
+ * finding's evidence links are reconciled to the file's set — but only as far as
+ * the file was entitled to describe them: see the converge step for why a
+ * report-filtered export cannot detach report-excluded evidence.
  *
  * The import is intentionally NOT wrapped in one transaction (blob writes are
  * side effects outside the DB, and imports can be large). It is instead
@@ -20,6 +22,7 @@ import {
   type FindingsImportResult,
 } from '@reporter/shared';
 import { HttpError } from '../auth/guards.js';
+import { REPORT_VISIBLE_EVIDENCE } from '../helpers/report-visibility.js';
 import { createEvidence } from './evidence.js';
 
 interface EngagementRef {
@@ -158,6 +161,10 @@ export async function importFindings(
             originalFilename: ev.originalFilename ?? undefined,
             occurredAt: ev.occurredAt,
             tagIds: [],
+            // Restore the report exclusion the export recorded, so an export →
+            // import round trip reproduces both the evidence and its exclusion
+            // rather than silently re-admitting it to every report output.
+            excludeFromReport: ev.excludeFromReport,
           },
           file: {
             data: Buffer.from(ev.contentBase64, 'base64'),
@@ -190,11 +197,24 @@ export async function importFindings(
 
     // Converge: drop any previously-linked evidence that's no longer in the file
     // (so re-importing an edited export detaches removed evidence too).
+    //
+    // Scoped to links the file could actually have mentioned. A default export is
+    // report-filtered: `buildFindingsExport` leaves report-excluded evidence out,
+    // so its absence from the file means "withheld", not "unlinked". Converging
+    // against it unrestricted would silently delete the finding's link to that
+    // evidence — along with its Attack Path bucket, position and caption, which
+    // for a path step *is* the content — leaving the row orphaned with nothing in
+    // the import result to hint at it. Same principle as the create-only
+    // `excludeFromReport` restore above: the live decision about excluded evidence
+    // belongs to the operator who made it, not to a file that cannot see it. A
+    // backup export (`includesExcludedEvidence`) does describe those links, so its
+    // removals apply in full.
     await app.db.evidenceFinding.deleteMany({
-      where:
-        keptEvidenceIds.length === 0
-          ? { findingId }
-          : { findingId, evidenceId: { notIn: keptEvidenceIds } },
+      where: {
+        findingId,
+        ...(keptEvidenceIds.length === 0 ? {} : { evidenceId: { notIn: keptEvidenceIds } }),
+        ...(data.includesExcludedEvidence ? {} : { evidence: REPORT_VISIBLE_EVIDENCE }),
+      },
     });
   }
 

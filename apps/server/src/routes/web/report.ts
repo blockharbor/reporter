@@ -214,8 +214,16 @@ async function renderPdf(app: FastifyInstance, html: string): Promise<Buffer> {
 
 /** Findings export: portable JSON and a rendered PDF report. */
 export async function reportRoutes(app: FastifyInstance): Promise<void> {
-  // JSON export (also the import format). `includeEvidenceContent` embeds blobs
-  // as base64 so the export can be re-imported into another server.
+  // JSON export (also the import format): the findings and their linked evidence.
+  // `includeEvidenceContent` embeds blobs as base64 so the export can be
+  // re-imported into another server.
+  //
+  // This is the one output that can be asked for report-excluded evidence:
+  // `includeExcludedEvidence` turns the file into a complete backup of the
+  // findings (excluded items included, flag set, so an import restores the
+  // exclusion). It is off unless the caller asks, no other option implies it, and
+  // this download is not recorded in report history — the bytes go to the caller
+  // and are not kept as an engagement artifact.
   app.get(
     '/engagements/:slug/findings/export.json',
     { preHandler: [requireAuth, requireEngagementRole('read')] },
@@ -223,9 +231,15 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const { slug } = req.params as { slug: string };
       const q = req.query as Record<string, string | undefined>;
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
+      const includeExcludedEvidence = boolParam(q.includeExcludedEvidence);
       const data = await buildFindingsExport(app, eng, new Date(), {
         includeAll: boolParam(q.includeAll),
-        includeEvidenceContent: boolParam(q.includeEvidenceContent),
+        // The exclusion opt-in implies content: it is justified only by making the
+        // file restorable, and without the bytes an import hits the
+        // reference-only `evidenceSkipped` branch for exactly those items — the
+        // sensitive half of the trade without the backup half.
+        includeEvidenceContent: boolParam(q.includeEvidenceContent) || includeExcludedEvidence,
+        includeExcludedEvidence,
       });
       reply.header(
         'Content-Disposition',
@@ -373,14 +387,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const preset = presetParam(q.preset);
       const { options, label } = reportFor(config, preset);
       const files = await gatherSupportingFiles(app, eng);
-      const html = await buildReportHtml(
-        app,
-        eng,
-        new Date(),
-        options,
-        req.authedUser!.id,
-        files,
-      );
+      const html = await buildReportHtml(app, eng, new Date(), options, req.authedUser!.id, files);
       const pdf = await renderPdf(app, html);
 
       const base = `${slug}-${label}-${stamp()}`;
@@ -432,6 +439,15 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const config = reportConfigSchema.parse(eng.reportConfig ?? {});
       const preset = presetParam(q.preset);
       const { options, label } = reportFor(config, preset);
+      // Deliberately no `includeExcludedEvidence` here, unlike
+      // `/findings/export.json`. This route is a *generated report* in the chosen
+      // preset: it carries that preset's label, it is recorded in report history,
+      // and its exact bytes are stored for re-download by anyone with read access.
+      // A backup containing report-excluded evidence must never become an
+      // indistinguishable row in that deliverable trail, where a later re-download
+      // could hand it to a client. It also could not be a real backup anyway — a
+      // preset only exports report-ready findings. Full backups go through
+      // `/findings/export.json`, which stores nothing.
       const data = await buildFindingsExport(app, eng, new Date(), {
         includeAll: options.includeAll ?? false,
         includeEvidenceContent: boolParam(q.includeEvidenceContent),
@@ -469,11 +485,12 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       if (!section) throw new HttpError(400, 'A section key is required');
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
       const config = reportConfigSchema.parse(eng.reportConfig ?? {});
-      const options: ReportOptions = { ...reportOptionsFromConfig(config), previewSectionKey: section };
+      const options: ReportOptions = {
+        ...reportOptionsFromConfig(config),
+        previewSectionKey: section,
+      };
       const html = await buildReportHtml(app, eng, new Date(), options, req.authedUser!.id);
-      reply
-        .header('Content-Type', 'text/html; charset=utf-8')
-        .header('Cache-Control', 'no-store');
+      reply.header('Content-Type', 'text/html; charset=utf-8').header('Cache-Control', 'no-store');
       return reply.send(html);
     },
   );
@@ -493,6 +510,14 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
 
   // Re-download a previously generated report's stored artifact bytes. Reports
   // generated before artifact storage have no blobKey and can't be served.
+  //
+  // A stored artifact is deliberately immutable: it is the record of what was
+  // handed over, so it keeps the report exclusions that were in force when it was
+  // generated. Excluding evidence today therefore does not redact yesterday's
+  // PDF/ZIP, and nothing here rewrites stored bytes. That is a stated decision
+  // rather than an oversight — the Reports tab says so next to the history list,
+  // so an operator who has just excluded something knows to generate a fresh
+  // report instead of assuming the old download changed.
   app.get(
     '/engagements/:slug/reports/:uuid/download',
     { preHandler: [requireAuth, requireEngagementRole('read')] },

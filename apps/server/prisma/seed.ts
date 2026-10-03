@@ -131,7 +131,9 @@ async function main() {
   });
 
   // A note with a short caption (description) AND a long-form body (blob) — shows
-  // the caption-on-top, body-below layout for notes.
+  // the caption-on-top, body-below layout for notes. Also the demo of
+  // `excludeFromReport`: internal rules-of-engagement detail that stays visible in
+  // the app (badged) but is kept out of every report output.
   const noteBody =
     'Client granted an eight-hour testing window (09:00–17:00 UTC). Out of scope: the ' +
     'billing subdomain and any destructive testing.\n\nEscalation contact: soc@acme.example.com.';
@@ -144,6 +146,7 @@ async function main() {
       description: 'Client-approved testing window and scope constraints.',
       fullBlobKey: await putBlob(Buffer.from(noteBody, 'utf8')),
       occurredAt: at(238),
+      excludeFromReport: true,
     },
   });
 

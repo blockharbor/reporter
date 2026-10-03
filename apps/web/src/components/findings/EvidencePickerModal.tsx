@@ -26,6 +26,8 @@ import { DateFilter } from '../evidence/filters/DateFilter.js';
 import { evidenceHeading, evidenceSnippet } from '../../lib/evidence-label.js';
 import { formatDateTime } from '../../lib/format.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
+import { userDisplayName } from '../../lib/user-display.js';
+import { ExcludedFromReportBadge } from '../evidence/ExcludedFromReportBadge.js';
 
 const TYPE_ICON: Record<string, string> = {
   image: '🖼',
@@ -148,7 +150,11 @@ export function EvidencePickerModal({
     }
   }
 
-  const title = onPick ? 'Add evidence' : targetInPath ? 'Add attack-path steps' : 'Attach evidence';
+  const title = onPick
+    ? 'Add evidence'
+    : targetInPath
+      ? 'Add attack-path steps'
+      : 'Attach evidence';
   const n = selected.length;
   const submitLabel = onPick
     ? n > 0
@@ -340,6 +346,9 @@ function PickerRow({
           )}
           <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
             <Badge tone="neutral">{EVIDENCE_TYPE_LABELS[ev.contentType]}</Badge>
+            {/* Still selectable: the author may want it on the finding for internal
+                work, but they need to know it won't appear in the report. */}
+            {ev.excludeFromReport && <ExcludedFromReportBadge />}
             <span>{formatDateTime(ev.occurredAt)}</span>
             {ev.tags.slice(0, 3).map((t) => (
               <TagChip key={t.id} name={t.name} colorName={t.colorName} />
@@ -364,14 +373,11 @@ function PreviewPane({ slug, ev }: { slug: string; ev: Evidence | null }) {
   return (
     <div className="max-h-[26rem] min-w-0 overflow-auto rounded-card border border-border bg-surface p-3">
       <p className="truncate text-sm font-medium text-text">{evidenceHeading(ev)}</p>
-      {evidenceSnippet(ev) && (
-        <p className="mt-0.5 text-xs text-muted">{evidenceSnippet(ev)}</p>
-      )}
+      {evidenceSnippet(ev) && <p className="mt-0.5 text-xs text-muted">{evidenceSnippet(ev)}</p>}
       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
         <Badge tone="neutral">{EVIDENCE_TYPE_LABELS[ev.contentType]}</Badge>
-        <span>
-          {ev.operator.firstName} {ev.operator.lastName}
-        </span>
+        {ev.excludeFromReport && <ExcludedFromReportBadge />}
+        <span>{userDisplayName(ev.operator)}</span>
         <span>{formatDateTime(ev.occurredAt)}</span>
       </div>
       {ev.tags.length > 0 && (

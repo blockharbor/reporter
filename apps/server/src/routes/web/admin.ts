@@ -1,14 +1,20 @@
 import { randomBytes, createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { defaultTagColorFor, type AdminEngagement, type AdminUser } from '@reporter/shared';
-import { HttpError, requireAdmin, requireAuth } from '../../auth/guards.js';
-import { createLocalUser } from '../../services/users.js';
 import {
-  serializeApiKey,
-  serializeEngagement,
-  serializeUser,
-} from '../../services/serializers.js';
+  CANNOT_DELETE_SELF,
+  defaultTagColorFor,
+  type AdminEngagement,
+  type AdminUser,
+} from '@reporter/shared';
+import { HttpError, requireAdmin, requireAuth } from '../../auth/guards.js';
+import {
+  assertSiteKeepsAnAdmin,
+  countUserDeletionImpact,
+  createLocalUser,
+  siteAdminBlockReason,
+} from '../../services/users.js';
+import { serializeApiKey, serializeEngagement, serializeUser } from '../../services/serializers.js';
 
 const adminGuard = [requireAuth, requireAdmin];
 
@@ -39,8 +45,18 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       })
       .parse(req.body);
 
+    // Deleting a user is a hard delete, which frees its unique email, so this only
+    // collides with a live account — or with a row the old soft-delete left behind,
+    // which the list view above hides and which therefore needs saying out loud.
     const exists = await app.db.user.findUnique({ where: { email: body.email } });
-    if (exists) throw new HttpError(409, 'A user with that email already exists');
+    if (exists) {
+      throw new HttpError(
+        409,
+        exists.deletedAt
+          ? 'A previously deleted account still holds that email address'
+          : 'A user with that email already exists',
+      );
+    }
 
     const user = await createLocalUser(app.db, {
       ...body,
@@ -57,25 +73,59 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       .parse(req.body);
     const user = await app.db.user.findUnique({ where: { slug } });
     if (!user) throw new HttpError(404, 'User not found');
+    // Demoting or disabling the last admin would lock everyone out of the Admin panel
+    // for good, so the patch is judged by the standing it leaves the user with.
+    await assertSiteKeepsAnAdmin(app.db, user, {
+      admin: body.admin ?? user.admin,
+      disabled: body.disabled ?? user.disabled,
+    });
     const updated = await app.db.user.update({ where: { id: user.id }, data: body });
     return serializeUser(updated);
   });
 
+  // What deleting this user would do, so the confirm dialog can warn before the
+  // click. A per-user route rather than extra columns on `GET /admin/users`: these
+  // are correlated subqueries that only the one user being deleted ever needs, and
+  // the list view is re-fetched on every visit to the Admin panel.
+  app.get('/admin/users/:slug/impact', { preHandler: adminGuard }, async (req) => {
+    const { slug } = req.params as { slug: string };
+    const user = await app.db.user.findUnique({ where: { slug } });
+    if (!user) throw new HttpError(404, 'User not found');
+    const impact = await countUserDeletionImpact(app.db, user.id);
+    // The same refusals, in the same words, the DELETE below would answer with — so
+    // the dialog can disable the button and explain instead of posting a doomed
+    // request.
+    const blockedReason =
+      user.id === req.authedUser!.id
+        ? CANNOT_DELETE_SELF
+        : await siteAdminBlockReason(app.db, user, null);
+    return { slug: user.slug, ...impact, canDelete: blockedReason === null, blockedReason };
+  });
+
+  // Hard delete with anonymization. The row is really removed — which also frees its
+  // unique email for reuse — and the schema's referential actions do the rest:
+  // sessions, API keys, auth identities, WebAuthn credentials, recovery codes,
+  // engagement roles and the engagement/evidence prefs cascade away, while the
+  // evidence this user captured, the comments they wrote, their last-edited stamps
+  // and the reports they generated all survive with their user reference set to NULL
+  // (every display site renders "Deleted user"). Evidence is the client deliverable,
+  // so it has to outlive its author; nothing is hand-deleted here that the database
+  // already handles.
   app.delete('/admin/users/:slug', { preHandler: adminGuard }, async (req) => {
     const { slug } = req.params as { slug: string };
     const user = await app.db.user.findUnique({ where: { slug } });
     if (!user) throw new HttpError(404, 'User not found');
-    if (user.id === req.authedUser!.id) throw new HttpError(400, 'You cannot delete yourself');
-    // Soft delete + revoke sessions/keys.
-    await app.db.$transaction([
-      app.db.user.update({
-        where: { id: user.id },
-        data: { deletedAt: new Date(), disabled: true },
-      }),
-      app.db.session.deleteMany({ where: { userId: user.id } }),
-      app.db.apiKey.deleteMany({ where: { userId: user.id } }),
-    ]);
-    return { ok: true };
+    if (user.id === req.authedUser!.id) throw new HttpError(400, CANNOT_DELETE_SELF);
+    await assertSiteKeepsAnAdmin(app.db, user, null);
+
+    // Count inside the transaction, before the row goes, so the numbers handed back
+    // describe exactly the rows this delete anonymized and revoked.
+    const impact = await app.db.$transaction(async (tx) => {
+      const counts = await countUserDeletionImpact(tx, user.id);
+      await tx.user.delete({ where: { id: user.id } });
+      return counts;
+    });
+    return { ok: true as const, slug: user.slug, ...impact };
   });
 
   // Generate a one-time recovery login link (admin-issued).
@@ -117,19 +167,15 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return keys.map(serializeApiKey);
   });
 
-  app.delete(
-    '/admin/users/:slug/api-keys/:accessKey',
-    { preHandler: adminGuard },
-    async (req) => {
-      const { slug, accessKey } = req.params as { slug: string; accessKey: string };
-      const user = await app.db.user.findUnique({ where: { slug } });
-      if (!user) throw new HttpError(404, 'User not found');
-      const key = await app.db.apiKey.findUnique({ where: { accessKey } });
-      if (!key || key.userId !== user.id) throw new HttpError(404, 'API key not found');
-      await app.db.apiKey.delete({ where: { id: key.id } });
-      return { ok: true };
-    },
-  );
+  app.delete('/admin/users/:slug/api-keys/:accessKey', { preHandler: adminGuard }, async (req) => {
+    const { slug, accessKey } = req.params as { slug: string; accessKey: string };
+    const user = await app.db.user.findUnique({ where: { slug } });
+    if (!user) throw new HttpError(404, 'User not found');
+    const key = await app.db.apiKey.findUnique({ where: { accessKey } });
+    if (!key || key.userId !== user.id) throw new HttpError(404, 'API key not found');
+    await app.db.apiKey.delete({ where: { id: key.id } });
+    return { ok: true };
+  });
 
   // --- Engagements (site-wide view; per-engagement mutations reuse the
   // /engagements/:slug routes, which site admins already bypass into) ---

@@ -27,7 +27,10 @@ import {
   type SortDirection,
 } from '@reporter/ui';
 import {
+  CANNOT_DELETE_SELF,
+  DELETED_USER_LABEL,
   ENGAGEMENT_STATUSES,
+  LAST_ADMIN_REASON,
   defaultTagColorFor,
   type AdminEngagement,
   type AdminUser,
@@ -35,10 +38,12 @@ import {
   type UpdateReportSettingsInput,
 } from '@reporter/shared';
 import { api } from '../api/client.js';
+import { useAuth } from '../auth.js';
 import {
   useAdminEngagements,
   useCreateUser,
   useDeleteEngagement,
+  useDeleteUser,
   useGenerateRecoveryLink,
   useReportSettings,
   useResetTotp,
@@ -75,16 +80,37 @@ export function AdminPage() {
   );
 }
 
+/**
+ * What `GET /web/admin/users/:slug/impact` reports about deleting one user.
+ * `evidence` and `comments` are the rows that are *kept* and anonymized — evidence
+ * is the client deliverable, so it outlives its author — while the memberships and
+ * API keys are destroyed with the account. `blockedReason` is the message the DELETE
+ * would fail with, or null.
+ */
+interface UserDeletionImpact {
+  evidence: number;
+  comments: number;
+  engagements: number;
+  apiKeys: number;
+  canDelete: boolean;
+  blockedReason: string | null;
+}
+
 function UsersTab() {
   const { data: users, isLoading, isError, refetch } = useUsers();
+  const { user: me } = useAuth();
   const updateUser = useUpdateUser();
   const toast = useToast();
   const confirm = useConfirm();
   const recovery = useGenerateRecoveryLink();
   const resetTotp = useResetTotp();
+  const removeUser = useDeleteUser();
   const [creating, setCreating] = useState(false);
   const [recoveryFor, setRecoveryFor] = useState<{ user: AdminUser; url: string } | null>(null);
   const [apiKeysFor, setApiKeysFor] = useState<AdminUser | null>(null);
+  // Held for the whole delete flow — the impact read, the dialog, and the request —
+  // so the row reads as busy throughout and a second click can't start a second one.
+  const [deletingSlug, setDeletingSlug] = useState<string | null>(null);
 
   async function generateRecovery(u: AdminUser) {
     try {
@@ -92,6 +118,19 @@ function UsersTab() {
       setRecoveryFor({ user: u, url: recoveryUrl });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not generate a recovery link');
+    }
+  }
+
+  /**
+   * Both toggles in the table are fire-and-forget patches whose only visible effect
+   * is the refetched row, so a refusal — demoting or disabling the last admin who can
+   * sign in — would otherwise look like a dead control.
+   */
+  async function patchUser(u: AdminUser, patch: { admin?: boolean; disabled?: boolean }) {
+    try {
+      await updateUser.mutateAsync({ slug: u.slug, patch });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update the user');
     }
   }
 
@@ -111,10 +150,92 @@ function UsersTab() {
     }
   }
 
+  // The admins who could actually reach this panel, mirroring `canAdministerSite` on
+  // the server: a disabled admin is turned away by the auth guards and a headless one
+  // has no password at all, so neither counts as the admin who has to stay behind.
+  const signInAdmins = (users ?? []).filter((u) => u.admin && !u.disabled && !u.headless);
+
+  /**
+   * Why this user cannot be deleted, or null when they can be. Both cases are decided
+   * from the list already on screen so the button can explain itself instead of firing
+   * a doomed request; the server enforces the same two rules, and `confirmDelete`
+   * re-checks them against fresh counts in case another admin has changed something
+   * since this list was fetched.
+   */
+  function deleteBlockedReason(u: AdminUser): string | null {
+    if (u.slug === me?.slug) return CANNOT_DELETE_SELF;
+    if (signInAdmins.length === 1 && signInAdmins[0]?.slug === u.slug) return LAST_ADMIN_REASON;
+    return null;
+  }
+
+  async function confirmDelete(u: AdminUser) {
+    const name = `${u.firstName} ${u.lastName}`;
+    setDeletingSlug(u.slug);
+    try {
+      // The impact read comes first: the warning below has to name real numbers to be
+      // honest about what survives, and a count it couldn't fetch is not one it may
+      // invent. It also carries the server's own refusal, which beats this list if the
+      // list has gone stale.
+      const impact = await api.get<UserDeletionImpact>(`/web/admin/users/${u.slug}/impact`);
+      if (!impact.canDelete) {
+        toast.error(impact.blockedReason ?? `${name} cannot be deleted`);
+        return;
+      }
+      const ok = await confirm({
+        title: 'Delete user',
+        // Four separate facts, one of them counterintuitive (the evidence stays), so
+        // this dialog sets them out as lines rather than one long sentence.
+        message: (
+          <span className="block space-y-2">
+            <span className="block">
+              Delete <span className="font-semibold">{name}</span> ({u.email})?
+            </span>
+            <span className="block">
+              Permanently removed: the account itself, every session and sign-in credential,{' '}
+              {impact.apiKeys} API key{impact.apiKeys === 1 ? '' : 's'}, and {impact.engagements}{' '}
+              engagement membership
+              {impact.engagements === 1 ? '' : 's'}. Their email address becomes available for a new
+              account.
+            </span>
+            <span className="block">
+              Kept: {impact.evidence} evidence item{impact.evidence === 1 ? '' : 's'} and{' '}
+              {impact.comments} comment{impact.comments === 1 ? '' : 's'} of theirs. Evidence is the
+              client deliverable, so it outlives its author — it stays in the timeline, on its
+              findings and in reports, attributed to “{DELETED_USER_LABEL}”.
+            </span>
+            <span className="block text-warning">This cannot be undone.</span>
+          </span>
+        ),
+        confirmLabel: 'Delete user',
+        danger: true,
+      });
+      if (!ok) return;
+      await removeUser.mutateAsync(u.slug);
+      toast.success(
+        impact.evidence > 0
+          ? `${name} deleted — ${impact.evidence} evidence item${
+              impact.evidence === 1 ? '' : 's'
+            } kept, now attributed to “${DELETED_USER_LABEL}”`
+          : `${name} deleted`,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not delete the user');
+    } finally {
+      setDeletingSlug(null);
+    }
+  }
+
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
-        <Button onClick={() => setCreating(true)}>New user</Button>
+      <div className="flex items-start justify-between gap-4">
+        <p className="text-xs text-muted">
+          Disabling a user is reversible — the account stays and can be switched back on. Deleting
+          one is permanent, but their evidence and comments are kept and reattributed to “
+          {DELETED_USER_LABEL}”.
+        </p>
+        <Button className="flex-none" onClick={() => setCreating(true)}>
+          New user
+        </Button>
       </div>
       {isLoading ? (
         <Spinner />
@@ -134,60 +255,80 @@ function UsersTab() {
             </Tr>
           </Thead>
           <Tbody>
-            {(users ?? []).map((u) => (
-              <Tr key={u.slug}>
-                <Td>
-                  {u.firstName} {u.lastName} {u.headless && <Badge>headless</Badge>}
-                </Td>
-                <Td className="text-muted">{u.email}</Td>
-                <Td>
-                  <Checkbox
-                    id={`admin-${u.slug}`}
-                    label=""
-                    aria-label={`Toggle admin for ${u.firstName} ${u.lastName}`}
-                    checked={u.admin}
-                    onChange={(e) =>
-                      updateUser.mutate({ slug: u.slug, patch: { admin: e.target.checked } })
-                    }
-                  />
-                </Td>
-                <Td>
-                  <button
-                    onClick={() =>
-                      updateUser.mutate({ slug: u.slug, patch: { disabled: !u.disabled } })
-                    }
-                    className="text-sm"
-                    aria-label={`${u.disabled ? 'Enable' : 'Disable'} ${u.firstName} ${u.lastName}`}
-                  >
-                    {u.disabled ? (
-                      <Badge tone="danger">disabled</Badge>
-                    ) : (
-                      <Badge tone="success">active</Badge>
-                    )}
-                  </button>
-                </Td>
-                <Td className="text-right">
-                  <div className="flex justify-end gap-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      loading={recovery.isPending && recovery.variables === u.slug}
-                      onClick={() => generateRecovery(u)}
+            {(users ?? []).map((u) => {
+              const blockedReason = deleteBlockedReason(u);
+              return (
+                <Tr key={u.slug}>
+                  <Td>
+                    {u.firstName} {u.lastName} {u.headless && <Badge>headless</Badge>}
+                  </Td>
+                  <Td className="text-muted">{u.email}</Td>
+                  <Td>
+                    <Checkbox
+                      id={`admin-${u.slug}`}
+                      label=""
+                      aria-label={`Toggle admin for ${u.firstName} ${u.lastName}`}
+                      checked={u.admin}
+                      onChange={(e) => patchUser(u, { admin: e.target.checked })}
+                    />
+                  </Td>
+                  <Td>
+                    <button
+                      onClick={() => patchUser(u, { disabled: !u.disabled })}
+                      className="text-sm"
+                      aria-label={`${u.disabled ? 'Enable' : 'Disable'} ${u.firstName} ${
+                        u.lastName
+                      }`}
+                      title={
+                        u.disabled
+                          ? 'Enable this account — reversible'
+                          : 'Disable this account — reversible, keeps the user and their evidence'
+                      }
                     >
-                      Recovery link
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={() => setApiKeysFor(u)}>
-                      API keys
-                    </Button>
-                    {u.hasTotp && (
-                      <Button variant="ghost" size="sm" onClick={() => confirmResetTotp(u)}>
-                        Reset TOTP
+                      {u.disabled ? (
+                        <Badge tone="danger">disabled</Badge>
+                      ) : (
+                        <Badge tone="success">active</Badge>
+                      )}
+                    </button>
+                  </Td>
+                  <Td className="text-right">
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        loading={recovery.isPending && recovery.variables === u.slug}
+                        onClick={() => generateRecovery(u)}
+                      >
+                        Recovery link
                       </Button>
-                    )}
-                  </div>
-                </Td>
-              </Tr>
-            ))}
+                      <Button variant="ghost" size="sm" onClick={() => setApiKeysFor(u)}>
+                        API keys
+                      </Button>
+                      {u.hasTotp && (
+                        <Button variant="ghost" size="sm" onClick={() => confirmResetTotp(u)}>
+                          Reset TOTP
+                        </Button>
+                      )}
+                      {/* The permanent counterpart to the status toggle, so it carries the
+                          destructive tone — and stays hoverable while disabled so the
+                          `title` can say why. */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-danger"
+                        disabled={blockedReason !== null}
+                        title={blockedReason ?? undefined}
+                        loading={deletingSlug === u.slug}
+                        onClick={() => confirmDelete(u)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </Td>
+                </Tr>
+              );
+            })}
           </Tbody>
         </Table>
       )}
@@ -893,7 +1034,11 @@ function ReportBrandingTab() {
         </div>
       </Field>
 
-      <Field label="Footer note" htmlFor="rb-footer" hint="e.g. “Confidential”. Shown on every page.">
+      <Field
+        label="Footer note"
+        htmlFor="rb-footer"
+        hint="e.g. “Confidential”. Shown on every page."
+      >
         <Input
           id="rb-footer"
           value={footerNote}

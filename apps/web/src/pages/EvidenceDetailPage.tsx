@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   Button,
   Card,
+  Checkbox,
   ErrorState,
   Field,
   Input,
@@ -25,6 +26,8 @@ import {
   useUpdateEvidence,
 } from '../api/hooks.js';
 import { READ_ONLY_TITLE, useEngagementPermissions } from '../lib/permissions.js';
+import type { SaveStatus } from '../hooks/useAutosave.js';
+import { SaveStatusIndicator } from '../components/SaveStatusIndicator.js';
 import { EvidenceBody } from '../components/evidence/EvidenceBody.js';
 import { EvidenceMeta } from '../components/evidence/EvidenceMeta.js';
 import { EvidenceEntryRow } from '../components/evidence/EvidenceEntryRow.js';
@@ -35,6 +38,10 @@ import {
   DeleteEvidenceDialog,
   type DeleteEvidenceMode,
 } from '../components/evidence/DeleteEvidenceDialog.js';
+import {
+  EXCLUDED_FROM_REPORT_HINT,
+  ExcludedFromReportBadge,
+} from '../components/evidence/ExcludedFromReportBadge.js';
 import { LinkedGoalsSection } from '../components/goals/LinkedGoalsSection.js';
 
 interface EvidenceForm {
@@ -88,6 +95,14 @@ export function EvidenceDetailPage() {
   // `move` opens it to move this comment under a different parent. Only one at a time.
   const [reparenting, setReparenting] = useState<null | 'attach' | 'move'>(null);
   const [linkBusy, setLinkBusy] = useState(false);
+  // Report exclusion saves the moment it's clicked, deliberately outside the
+  // Details Edit → Save draft: a decision about what the client does and doesn't
+  // see must never be discarded by Cancel. `pendingExclude` holds the optimistic
+  // value so the box flips at once; it survives a success (it already matches
+  // what the server stored — clearing it would flash the old state until the
+  // refetch lands) and is dropped on failure to revert the box.
+  const [pendingExclude, setPendingExclude] = useState<boolean | null>(null);
+  const [excludeStatus, setExcludeStatus] = useState<SaveStatus>('idle');
 
   function startEditDetails() {
     if (!evidence) return;
@@ -119,6 +134,19 @@ export function EvidenceDetailPage() {
     }
   }
 
+  async function saveExcludeFromReport(next: boolean) {
+    setPendingExclude(next);
+    setExcludeStatus('saving');
+    try {
+      await update.mutateAsync({ uuid, patch: { excludeFromReport: next } });
+      setExcludeStatus('saved');
+    } catch (err) {
+      setPendingExclude(null);
+      setExcludeStatus('error');
+      toast.error(err instanceof Error ? err.message : 'Could not change report exclusion');
+    }
+  }
+
   if (isLoading) return <Spinner size={26} />;
   if (isError)
     return <ErrorState description="Couldn’t load this evidence." onRetry={() => refetch()} />;
@@ -127,6 +155,7 @@ export function EvidenceDetailPage() {
   // A comment is one level deep, so only top-level evidence hosts linked evidence.
   const isComment = evidence.parentEvidenceUuid !== null;
   const linkedList = linkedEvidence.data ?? [];
+  const excludeFromReport = pendingExclude ?? evidence.excludeFromReport;
 
   // Attach (parent uuid) / move (new parent uuid) / detach (null) all funnel
   // through one PUT of `parentEvidenceUuid`.
@@ -366,7 +395,15 @@ export function EvidenceDetailPage() {
             ) : (
               <ul className="flex flex-col gap-2">
                 {linkedList.map((c) => (
-                  <EvidenceEntryRow key={c.uuid} slug={slug} ev={c} />
+                  // Exclusion is inherited: while this item is excluded, everything
+                  // linked under it is withheld from reports too, so each row says so
+                  // rather than looking report-bound.
+                  <EvidenceEntryRow
+                    key={c.uuid}
+                    slug={slug}
+                    ev={c}
+                    parentExcludedFromReport={excludeFromReport}
+                  />
                 ))}
               </ul>
             )}
@@ -378,6 +415,33 @@ export function EvidenceDetailPage() {
 
         {/* Plain-text discussion comments — available on any evidence. */}
         <EvidenceCommentsCard slug={slug} uuid={uuid} canWrite={canWrite} />
+
+        {/* Report — whether this evidence reaches the client at all. Its own card
+            above the Danger zone, and saved on click rather than folded into the
+            Details draft. */}
+        <Card className="space-y-2 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-text">Report</h3>
+            <div className="flex items-center gap-2">
+              {excludeFromReport && <ExcludedFromReportBadge />}
+              {canWrite && <SaveStatusIndicator status={excludeStatus} />}
+            </div>
+          </div>
+          <Checkbox
+            label="Exclude from reports"
+            checked={excludeFromReport}
+            onChange={(e) => void saveExcludeFromReport(e.target.checked)}
+            disabled={!canWrite || excludeStatus === 'saving'}
+            title={canWrite ? undefined : READ_ONLY_TITLE}
+          />
+          <p className="pl-6 text-xs text-muted">{EXCLUDED_FROM_REPORT_HINT}</p>
+          {excludeFromReport && (
+            <p className="pl-6 text-xs text-muted">
+              It stays visible here, in the timeline and on every finding it’s attached to, so you
+              can include it again later.
+            </p>
+          )}
+        </Card>
 
         {/* Danger zone — deletion lives on its own at the very bottom, deliberately
             separated from the Details edit flow, mirroring the engagement settings

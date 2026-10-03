@@ -527,7 +527,9 @@ export type Tag = z.infer<typeof tagSchema>;
 export const evidenceSchema = z.object({
   uuid: uuidSchema,
   engagementSlug: slugSchema,
-  operator: userSchema.pick({ slug: true, firstName: true, lastName: true }),
+  /** Who captured this evidence, or null once that user has been deleted (the
+   *  evidence outlives its author; the UI renders "Deleted user"). */
+  operator: userSchema.pick({ slug: true, firstName: true, lastName: true }).nullable(),
   /** Short label for the evidence — the primary heading shown in lists, cards, and
    *  the report. May be empty on evidence created before titles existed (the UI then
    *  falls back to the description, then the content-type label). */
@@ -558,6 +560,12 @@ export const evidenceSchema = z.object({
   commentCount: z.number().int().nonnegative(),
   /** Whether the requesting user starred this evidence (per-user, like engagement favorites). */
   starred: z.boolean().optional(),
+  /** When true this evidence is omitted from every report output — the PDF, the
+   *  supporting-files ZIP and the JSON export — as is any linked evidence hanging
+   *  off it. It stays fully visible in the app, badged, so it can be un-excluded.
+   *  The one way to get it into a file is an explicit backup export, which carries
+   *  the flag so an import restores the exclusion with the evidence. */
+  excludeFromReport: z.boolean(),
 });
 export type Evidence = z.infer<typeof evidenceSchema>;
 
@@ -609,7 +617,12 @@ export const findingSchema = z.object({
   /** Manual sort position within the engagement's findings (ascending). */
   position: z.number().int().nonnegative(),
   numEvidence: z.number().int().nonnegative(),
+  /** How many engagement goals this finding is linked to (drives the Findings
+   *  page's linked-goals filter/sort). */
+  numGoals: z.number().int().nonnegative(),
   createdAt: isoDateSchema,
+  /** Last modification time; equals `createdAt` until the finding is edited. */
+  updatedAt: isoDateSchema,
 });
 export type Finding = z.infer<typeof findingSchema>;
 
@@ -796,6 +809,10 @@ export const createEvidenceInput = z.object({
    * follow-ups/updates. The parent must not itself be a comment (one level deep).
    */
   parentEvidenceUuid: uuidSchema.optional(),
+  /** Create the evidence already excluded from every report output. Defaults to
+   *  false; set by findings-import so an export → import round trip restores the
+   *  flag along with the evidence. */
+  excludeFromReport: z.boolean().default(false),
 });
 export type CreateEvidenceInput = z.infer<typeof createEvidenceInput>;
 
@@ -823,6 +840,8 @@ export const updateEvidenceInput = z.object({
    * valid for text content types — the server rejects it for image/recording.
    */
   content: z.string().optional(),
+  /** Hide (true) or re-include (false) this evidence in every report output. */
+  excludeFromReport: z.boolean().optional(),
 });
 export type UpdateEvidenceInput = z.infer<typeof updateEvidenceInput>;
 
@@ -835,7 +854,9 @@ export type UpdateEvidenceInput = z.infer<typeof updateEvidenceInput>;
 export const evidenceCommentSchema = z.object({
   uuid: uuidSchema,
   body: z.string(),
-  author: userSchema.pick({ slug: true, firstName: true, lastName: true }),
+  /** Who wrote the comment, or null once that user has been deleted (the UI
+   *  renders "Deleted user"). */
+  author: userSchema.pick({ slug: true, firstName: true, lastName: true }).nullable(),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
   edited: z.boolean(),
@@ -947,7 +968,20 @@ export function paginated<T extends z.ZodTypeAny>(item: T) {
 // ---------------------------------------------------------------------------
 
 /** Bump when the export shape changes incompatibly; import validates it. */
-export const FINDINGS_EXPORT_VERSION = 3;
+export const FINDINGS_EXPORT_VERSION = 4;
+
+/**
+ * The version an export is stamped with when nothing in it needs v4 semantics —
+ * i.e. when no evidence item carries `excludeFromReport: true`.
+ *
+ * v4 exists only to stop a backup containing report-excluded evidence from
+ * importing *quietly* into a pre-exclusion server: that server validates
+ * `schemaVersion <= 3` and strips the `excludeFromReport` field it has never
+ * heard of, which would recreate the evidence un-excluded and re-admit it to its
+ * reports. Nothing else about the shape changed, so every export that carries no
+ * excluded evidence keeps the older stamp and keeps importing there.
+ */
+export const FINDINGS_EXPORT_VERSION_WITHOUT_EXCLUSIONS = 3;
 
 /** One evidence item inside an export. `contentBase64` is present only when the
  *  export was requested with `includeEvidenceContent` (makes it portable across
@@ -966,6 +1000,13 @@ export const exportedEvidenceSchema = z.object({
   caption: z.string().default(''),
   /** Which bucket the link belongs to: Attack Path (true) vs Attached Evidence (false). */
   inPath: z.boolean().default(false),
+  /** Whether the evidence is excluded from report output — its own flag, or its
+   *  parent's when it is linked evidence under an excluded capture, since the
+   *  export carries no parent links to re-derive it from. Carried through so a
+   *  round trip restores the exclusion, and defaults to false for exports made
+   *  before the flag existed. Only a backup export (`includesExcludedEvidence`)
+   *  can ever set it. */
+  excludeFromReport: z.boolean().default(false),
 });
 export type ExportedEvidence = z.infer<typeof exportedEvidenceSchema>;
 
@@ -1002,6 +1043,15 @@ export const findingsExportSchema = z.object({
   exportedAt: isoDateSchema,
   engagement: z.object({ slug: slugSchema, name: z.string() }),
   includesEvidenceContent: z.boolean(),
+  /**
+   * Whether this file was allowed to describe evidence flagged
+   * `excludeFromReport` (the backup-export opt-in). False — the default, and what
+   * every older file parses as — marks the file as a *report-filtered* view: the
+   * importer then knows that an excluded item's absence means "withheld from this
+   * export", not "unlinked from the finding", and leaves such links alone instead
+   * of converging them away.
+   */
+  includesExcludedEvidence: z.boolean().default(false),
   findings: z.array(exportedFindingSchema).max(MAX_IMPORT_FINDINGS),
 });
 export type FindingsExport = z.infer<typeof findingsExportSchema>;

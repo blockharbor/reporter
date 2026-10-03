@@ -8,8 +8,61 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ## [Unreleased]
 
+### Added
+
+- **Exclude a piece of evidence from reports.** Each piece of evidence gets a
+  **Report** card with an **Exclude from reports** checkbox. Excluded evidence is
+  left out of _every_ report output — all six PDF inclusion paths, the
+  supporting-files ZIP (and its `SHA256SUMS.txt` / "Files Attached" table), the
+  per-goal coverage counts, the cover and Executive Summary evidence totals, and
+  the JSON export. **Linked evidence under an excluded capture is withheld too**:
+  a report renders a follow-up capture standalone, so shipping one whose parent was
+  withheld would hand over a fragment of a withheld capture. It all stays **fully
+  visible in the app** — timeline, finding pages, and pickers — badged **Excluded
+  from reports**, so it can always be un-excluded.
+- **Backup export.** Reports → Generate gets a **Backup export** card: a full JSON
+  data export (every finding, evidence content embedded) for backups and transfers
+  between servers, downloaded rather than recorded in report history. It is the only
+  output with an **Include evidence excluded from reports** opt-in — off by default.
+  When it is on, excluded evidence is exported carrying its flag, so an
+  export → import round trip restores both the evidence **and** its exclusion
+  instead of losing it. Every other output — the PDF, the ZIP bundle and its
+  `SHA256SUMS.txt` / "Files Attached" table, the per-goal and cover counts, the
+  preset **Export JSON** deliverable, and this export by default — remains
+  incapable of emitting report-excluded evidence. Asking for excluded evidence
+  implies embedding content, because metadata without the bytes could not restore
+  anything; and a file that carries excluded evidence is stamped with export schema
+  version 4, so an older server rejects it outright instead of importing it with the
+  exclusion silently stripped.
+- **Delete a user from the Admin panel.** Deleting a user is a **hard delete that
+  anonymizes rather than destroys**: the account, its sessions, sign-in credentials,
+  API keys, and engagement memberships are permanently removed (freeing the email
+  address for a new account), but the evidence they captured and the comments they
+  wrote are **kept** — evidence is the client deliverable, so it outlives its author
+  — and are reattributed to **"Deleted user"** everywhere, including the generated
+  report. A pre-flight dialog shows exactly what will be removed and what will be
+  kept, with real counts. You cannot delete yourself, and the last admin who can
+  sign in can no longer delete, demote, or disable themselves out of the Admin
+  panel.
+- **Filter and sort the Findings page.** The full facet set: free text (title,
+  description, and affected target), severity (including **Unrated**), kind,
+  category (including **Uncategorized**), ready-to-report, fix effort, has/has-no
+  linked evidence, affected target, and ISO 21434 / UN R155 mapping — each as
+  _mapped_ / _not mapped_ plus a searchable list of the refs actually in use.
+  Sort by manual order, severity, title, created, **last updated**, evidence
+  count, or **linked-goals count**, ascending or descending. Filters live in the
+  URL so a filtered view is shareable, removable chips show what is active, and
+  drag-to-reorder is disabled (with the reason in a tooltip) whenever a filter or
+  a non-manual sort would make reordering write the wrong positions.
+
 ### Changed
 
+- **A report never claims a finding has no evidence when it does.** When a
+  finding's evidence is filtered out of a report — by a section toggle or by the
+  new report exclusion — the report now prints **nothing** instead of
+  "No evidence attached.", which would have been a false statement in a signed
+  client deliverable. Attack Path steps renumber contiguously, so an omission is
+  not advertised by a gap in the numbering.
 - **"Linked evidence" now sits directly under "Linked goals"** on the evidence
   detail page, instead of below the Content and Comments sections — grouping the
   two linking panels together near the top.
@@ -19,6 +72,36 @@ with `pnpm run version:bump <major|minor|patch>`.
   heading, description of what's removed), matching the engagement settings Danger
   zone. Deletion still runs through the existing confirmation dialog (which, for an
   item with linked evidence, lets you keep or cascade its children).
+
+### Fixed
+
+- **Re-importing a report-filtered export no longer detaches withheld evidence.**
+  The deliverable JSON export leaves report-excluded evidence out, and the importer
+  reconciled a finding's evidence links to exactly the file's list — so importing a
+  deliverable export back into its own engagement silently deleted the finding's
+  link to every excluded item, along with the Attack Path bucket, position and
+  caption that _are_ the content of a path step, with nothing in the import result
+  to hint at it. The export now records whether it was allowed to describe excluded
+  evidence (`includesExcludedEvidence`), and a file that was not cannot detach what
+  it could not see. A backup export does describe those links, so its removals still
+  apply in full.
+- **Hyphens can be typed in an engagement slug again.** The new-engagement form
+  stripped a hyphen the instant it was typed, so "red-team" could only ever be
+  pasted — the slug field ran its finalizing slugifier on every keystroke, and a
+  trailing hyphen is an unavoidable waypoint on the way to a valid slug. Typing is
+  now lenient and the slug is finalized on blur and again before submit, so nothing
+  invalid reaches the server. Separately, slugifying a long name could produce a
+  slug ending in a hyphen (the 64-character cap ran _after_ the trailing-hyphen
+  strip rather than before it) — a value the slug schema then rejected on read.
+- **Dialogs accept more than one keystroke.** In any dialog whose parent owned the
+  input's state — **Save query**, **Edit saved query**, and the type-the-slug
+  **Delete engagement** confirmation — typing a single character moved focus to the
+  dialog's ✕ button, making them effectively unusable. The shared `Modal` primitive
+  re-ran its focus effect on every re-render; it now only runs when the dialog
+  opens. Initial focus also no longer lands on the ✕: a caller's `autoFocus` is
+  honoured, otherwise the first control in the dialog body is focused, and focus
+  returns to whatever opened the dialog when it closes. The same fix was applied to
+  `Popover`.
 
 ## [0.9.0] - 2026-09-04
 
@@ -203,7 +286,7 @@ with `pnpm run version:bump <major|minor|patch>`.
   editor preview and the exported PDF, so what you preview is what the report
   prints — headings, lists, **bold**, links, code, and tables all render, and a
   blank line between paragraphs produces real paragraph spacing. (Code / HAR /
-  note *content* fields stay plain — Markdown applies to prose only.)
+  note _content_ fields stay plain — Markdown applies to prose only.)
 - **Choose how findings are grouped in the report** — the Reports tab gains a
   **Findings grouping** option: **by severity** (default, unchanged), **by
   category**, or **by affected target**. The Summary of Weaknesses table and the
@@ -318,7 +401,7 @@ with `pnpm run version:bump <major|minor|patch>`.
 - **Unsaved-changes handling across the app.** Edit-in-place detail pages
   (**evidence**, **finding**, and **engagement settings**) now **autosave** as you
   type — debounced, with a **"Saved"** breadcrumb toast and a live
-  *Unsaved / Saving… / Saved* status — and block the save with an inline error
+  _Unsaved / Saving… / Saved_ status — and block the save with an inline error
   while a required field (e.g. a blank title) is invalid. The create forms that
   have nothing to autosave yet (**Add evidence**, **Add finding**, and the desktop
   capture window) instead prompt **"Discard changes?"** when you try to leave a
@@ -368,7 +451,7 @@ with `pnpm run version:bump <major|minor|patch>`.
   - Every one of these is editable in **Engagement Settings** (like the executive
     summary), and round-trips through the findings JSON export/import.
 - **Findings can be a Strength or a Weakness.** A finding now has a **kind**
-  (default *weakness*) selectable when creating a finding and in the finding
+  (default _weakness_) selectable when creating a finding and in the finding
   editor. Strengths appear only in the Summary of Strengths table; the server
   clears severity/CVSS/fix-effort/impact/remediation on a strength so it can never
   enter the weaknesses dashboard/tables.
@@ -401,7 +484,7 @@ with `pnpm run version:bump <major|minor|patch>`.
   it now attaches the `.dmg` / `.exe` / `.AppImage` / `.tar.gz` / `.deb` and the
   `reporter-term` `.tgz` to the tag's Release via `softprops/action-gh-release`,
   adds `permissions: contents: write`, and fails loudly (`if-no-files-found:
-  error`) if a build produced nothing.
+error`) if a build produced nothing.
 - **Desktop Linux is no longer Ubuntu/Debian-only.** The Linux build now also
   ships a distro-agnostic **`tar.gz`** (extract-and-run, no package manager or
   FUSE required — works on Arch and any distro) alongside the AppImage and `.deb`.
@@ -671,7 +754,7 @@ with `pnpm run version:bump <major|minor|patch>`.
   binding a system shortcut to `reporter --capture-area` / `--capture-window`.
 - **Desktop app now runs on Linux VMs / headless boxes.** On Linux the Chromium
   GPU process often fails to initialize on machines without a real GPU (`Exiting
-  GPU process due to errors during initialization`), which could leave the capture
+GPU process due to errors during initialization`), which could leave the capture
   window blank. GPU acceleration is now disabled on Linux (the tray + form UI
   doesn't need it); set `REPORTER_ENABLE_GPU=1` to force it back on.
 - **Desktop Linux executable is now `reporter`** (was `@reporterdesktop`, derived
@@ -689,7 +772,7 @@ with `pnpm run version:bump <major|minor|patch>`.
   bit, so the very first recording aborts before the shell starts. The recorder
   now restores `+x` on `spawn-helper` (macOS/Linux) right before spawning, so
   recording works regardless of how node-pty was unpacked. No-op on Windows
-  (ConPTY has no helper). When it *can't* self-heal — e.g. a `sudo npm install`
+  (ConPTY has no helper). When it _can't_ self-heal — e.g. a `sudo npm install`
   left the files owned by root — it no longer dumps a raw stack trace but prints
   an actionable message telling you to `chmod +x` the helper (with `sudo` when
   it's root-owned) or reinstall without sudo.

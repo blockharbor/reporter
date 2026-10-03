@@ -46,6 +46,9 @@ export async function drainQueue(onChange: () => void): Promise<void> {
             contentSubtype: item.contentSubtype,
             parentEvidenceUuid: item.parentEvidenceUuid,
             originalFilename,
+            // Captures start report-eligible; excluding one is an editorial call
+            // made later in the web UI, so the tray app never sets this.
+            excludeFromReport: false,
           },
           file,
         );

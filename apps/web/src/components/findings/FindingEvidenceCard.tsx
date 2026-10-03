@@ -7,6 +7,7 @@ import { evidenceHeading, evidenceSnippet } from '../../lib/evidence-label.js';
 import { formatDateTime } from '../../lib/format.js';
 import { READ_ONLY_TITLE } from '../../lib/permissions.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
+import { ExcludedFromReportBadge } from '../evidence/ExcludedFromReportBadge.js';
 
 const TYPE_ICON: Record<string, string> = {
   image: '🖼',
@@ -105,6 +106,9 @@ export function FindingEvidenceCard({
           )}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
             <Badge tone="neutral">{EVIDENCE_TYPE_LABELS[ev.contentType]}</Badge>
+            {/* The link stays — the exclusion only withholds it from report output,
+                so the author can see the gap the report will have. */}
+            {ev.excludeFromReport && <ExcludedFromReportBadge />}
             <span>{formatDateTime(ev.occurredAt)}</span>
             {ev.tags.slice(0, 3).map((t) => (
               <TagChip key={t.id} name={t.name} colorName={t.colorName} />

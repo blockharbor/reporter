@@ -30,6 +30,7 @@ import type {
   Tag,
   Target,
   UpdateActivityInput,
+  UpdateEvidenceInput,
   UpdateFindingEvidenceInput,
   UpdateGoalInput,
   UpdateReportSettingsInput,
@@ -196,10 +197,9 @@ export function useUpdateEvidenceComment(slug: string, uuid: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (args: { commentUuid: string; body: string }) =>
-      api.put<EvidenceComment>(
-        `/web/engagements/${slug}/evidence/comments/${args.commentUuid}`,
-        { body: args.body },
-      ),
+      api.put<EvidenceComment>(`/web/engagements/${slug}/evidence/comments/${args.commentUuid}`, {
+        body: args.body,
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['evidence-comments', slug, uuid] }),
   });
 }
@@ -213,8 +213,13 @@ export function useDeleteEvidenceComment(slug: string, uuid: string) {
   });
 }
 
-/** An operator as it appears on evidence (for the timeline operator filter). */
-export type EvidenceOperator = Evidence['operator'];
+/**
+ * An operator as it appears on evidence (for the timeline operator filter).
+ * `Evidence['operator']` is nullable because evidence outlives a deleted user,
+ * but the `/evidence/operators` endpoint only lists users who still exist — so
+ * the filter's own type is the non-null half.
+ */
+export type EvidenceOperator = NonNullable<Evidence['operator']>;
 
 /** Distinct operators who have evidence in the engagement (read-level). */
 export const useEvidenceOperators = (slug: string) =>
@@ -260,14 +265,23 @@ export function useToggleEvidenceStar(slug: string, uuid: string) {
   });
 }
 
+/**
+ * Patch one piece of evidence. Every field is optional, so this also serves the
+ * single-field saves (e.g. the report-exclusion toggle, which saves immediately).
+ */
 export function useUpdateEvidence(slug: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (args: { uuid: string; patch: Record<string, unknown> }) =>
+    mutationFn: (args: { uuid: string; patch: UpdateEvidenceInput }) =>
       api.put<Evidence>(`/web/engagements/${slug}/evidence/${args.uuid}`, args.patch),
     onSuccess: (_d, v) => {
       invalidateTimeline(qc, slug);
       qc.invalidateQueries({ queryKey: ['evidence', slug, v.uuid] });
+      // The same evidence is also rendered inside its parent's linked-evidence
+      // list and on every finding it is attached to; those copies carry the title,
+      // tags and the excluded-from-report flag, so refresh them too.
+      qc.invalidateQueries({ queryKey: ['linked-evidence', slug] });
+      qc.invalidateQueries({ queryKey: ['finding', slug] });
     },
   });
 }
@@ -590,7 +604,10 @@ export function useCreateActivity(slug: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (args: { targetId: number; input: CreateActivityInput }) =>
-      api.post<Activity>(`/web/engagements/${slug}/targets/${args.targetId}/activities`, args.input),
+      api.post<Activity>(
+        `/web/engagements/${slug}/targets/${args.targetId}/activities`,
+        args.input,
+      ),
     // A new activity auto-creates a correlation tag — refresh the tag list too.
     onSuccess: () => {
       invalidateGoals(qc, slug);
@@ -730,8 +747,7 @@ export function useUnlinkGoalFinding(slug: string) {
 export const useGoalsForEvidence = (slug: string, uuid: string) =>
   useQuery({
     queryKey: ['goals-for-evidence', slug, uuid],
-    queryFn: () =>
-      api.get<LinkedGoal[]>(`/web/engagements/${slug}/goals/for-evidence/${uuid}`),
+    queryFn: () => api.get<LinkedGoal[]>(`/web/engagements/${slug}/goals/for-evidence/${uuid}`),
     enabled: Boolean(slug && uuid),
   });
 
@@ -836,6 +852,36 @@ export function useUpdateUser() {
   });
 }
 
+/**
+ * Delete a user for good. The row is really removed and the evidence/comments
+ * they authored are anonymized rather than deleted (the evidence is the client
+ * deliverable), which changes how the operator and comment author render
+ * everywhere — hence the un-scoped evidence key prefixes: the user may have
+ * worked across any number of engagements.
+ */
+export function useDeleteUser() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (slug: string) => api.del(`/web/admin/users/${slug}`),
+    onSuccess: (_d, slug) => {
+      qc.invalidateQueries({ queryKey: ['admin-users'] });
+      // Memberships go with the user, so member counts and member lists move.
+      qc.invalidateQueries({ queryKey: ['engagements'] });
+      qc.invalidateQueries({ queryKey: ['admin-engagements'] });
+      qc.invalidateQueries({ queryKey: ['eng-users'] });
+      // Anything that renders an operator or a comment author.
+      qc.invalidateQueries({ queryKey: ['timeline'] });
+      qc.invalidateQueries({ queryKey: ['evidence'] });
+      qc.invalidateQueries({ queryKey: ['linked-evidence'] });
+      qc.invalidateQueries({ queryKey: ['evidence-comments'] });
+      qc.invalidateQueries({ queryKey: ['evidence-operators'] });
+      qc.invalidateQueries({ queryKey: ['finding'] });
+      // Their API keys were revoked with them; drop the cached list outright.
+      qc.removeQueries({ queryKey: ['admin-user-api-keys', slug] });
+    },
+  });
+}
+
 /** Every engagement site-wide, with counts and the admin's own membership flag. */
 export const useAdminEngagements = () =>
   useQuery({
@@ -874,8 +920,7 @@ export function useRevokeUserApiKey() {
   return useMutation({
     mutationFn: (args: { slug: string; accessKey: string }) =>
       api.del(`/web/admin/users/${args.slug}/api-keys/${encodeURIComponent(args.accessKey)}`),
-    onSuccess: (_d, v) =>
-      qc.invalidateQueries({ queryKey: ['admin-user-api-keys', v.slug] }),
+    onSuccess: (_d, v) => qc.invalidateQueries({ queryKey: ['admin-user-api-keys', v.slug] }),
   });
 }
 

@@ -12,13 +12,16 @@ import {
   type GoalStatus,
   type Target,
 } from '@reporter/shared';
+import { REPORT_VISIBLE_EVIDENCE } from '../helpers/report-visibility.js';
 
 export function emptyProgress(): EngagementProgress {
   return { total: 0, complete: 0, inProgress: 0, notStarted: 0, notApplicable: 0, percent: 0 };
 }
 
 /** Build an `EngagementProgress` from a per-status count map. */
-export function progressFromCounts(counts: Partial<Record<GoalStatus, number>>): EngagementProgress {
+export function progressFromCounts(
+  counts: Partial<Record<GoalStatus, number>>,
+): EngagementProgress {
   const complete = counts.complete ?? 0;
   const inProgress = counts.in_progress ?? 0;
   const notStarted = counts.not_started ?? 0;
@@ -71,8 +74,22 @@ export async function computeOneEngagementProgress(
   return map.get(engagementId);
 }
 
-/** The full goals tree for an engagement, serialized to the client shape. */
-export async function fetchGoalsTree(app: FastifyInstance, engagementId: number): Promise<Target[]> {
+/**
+ * The full goals tree for an engagement, serialized to the client shape.
+ *
+ * `forReport` scopes each goal's evidence tally to evidence the report is allowed
+ * to show ({@link REPORT_VISIBLE_EVIDENCE}). Without it a goal whose only evidence
+ * is excluded prints "0 / 1" in the Scope & Objectives Coverage table — pointing
+ * the reader at an item that appears nowhere in the document. The interactive
+ * Goals page omits the flag and keeps the true totals, because excluded evidence
+ * stays visible in the app (badged) so it can be un-excluded.
+ */
+export async function fetchGoalsTree(
+  app: FastifyInstance,
+  engagementId: number,
+  opts: { forReport?: boolean } = {},
+): Promise<Target[]> {
+  const evidenceCount = opts.forReport ? { where: { evidence: REPORT_VISIBLE_EVIDENCE } } : true;
   const targets = await app.db.engagementTarget.findMany({
     where: { engagementId },
     orderBy: [{ position: 'asc' }, { id: 'asc' }],
@@ -82,7 +99,7 @@ export async function fetchGoalsTree(app: FastifyInstance, engagementId: number)
         include: {
           goals: {
             orderBy: [{ position: 'asc' }, { id: 'asc' }],
-            include: { _count: { select: { evidence: true, findings: true } } },
+            include: { _count: { select: { evidence: evidenceCount, findings: true } } },
           },
         },
       },

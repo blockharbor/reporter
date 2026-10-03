@@ -12,6 +12,11 @@ export interface EvidenceRequest {
  * Extract evidence metadata (+ optional file) from a create-evidence request,
  * supporting both `multipart/form-data` (JSON `notes` part + `file` part) and a
  * plain JSON body (inline content, no file). Shared by the web and client APIs.
+ *
+ * Clients that predate `excludeFromReport` keep parsing: the schema defaults it to
+ * false. There is no HMAC *update* route, so a client can only ever set the flag as it
+ * creates the evidence (findings-import does, to restore an export); the web UI toggles
+ * it afterwards through `PUT /web/engagements/:slug/evidence/:uuid`.
  */
 export async function parseEvidenceRequest(req: FastifyRequest): Promise<EvidenceRequest> {
   const contentType = req.headers['content-type'] ?? '';

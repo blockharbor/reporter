@@ -113,6 +113,10 @@ export async function createEvidence(
       sizeBytes,
       parentEvidenceId,
       occurredAt,
+      // Normally false — capture clients never exclude. It is carried here so that
+      // findings-import can restore the flag from an export, making an
+      // export → import round trip preserve the exclusion along with the evidence.
+      excludeFromReport: metadata.excludeFromReport,
       tags: { create: validTags.map((t) => ({ tagId: t.id })) },
     },
     include: evidenceInclude(args.operatorId),
