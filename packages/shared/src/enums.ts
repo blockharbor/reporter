@@ -273,6 +273,20 @@ export const REPORT_SECTION_HINTS: Record<ReportSection, string> = {
   appendix: 'Severity & CVSS reference table.',
 };
 
+/**
+ * Caps on the two lists a report configuration carries (`reportConfigSchema`).
+ * Exported rather than inlined in the zod `.max()` calls because the web app needs
+ * the same numbers to disable "Add section" at the ceiling and to refuse a report
+ * template whose custom sections would overflow the engagement's own — a cap the
+ * UI guessed at would either block early or let a save 400.
+ *
+ * The section-entry cap is the looser of the two: a configuration holds one entry
+ * per built-in section plus one per custom section, and may keep a disabled row for
+ * a custom section the author is not currently rendering.
+ */
+export const MAX_REPORT_CUSTOM_SECTIONS = 30;
+export const MAX_REPORT_SECTION_ENTRIES = 50;
+
 /** One independently-toggleable piece of a report section, shown when the section
  *  is expanded in the Reports configurator. */
 export interface ReportSectionItem {

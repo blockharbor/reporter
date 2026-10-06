@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import {
   EVIDENCE_TYPES,
+  MAX_REPORT_CUSTOM_SECTIONS,
+  MAX_REPORT_SECTION_ENTRIES,
   WATERMARK_MAX_CHARS,
   evidenceTypeSchema,
   engagementRoleSchema,
@@ -192,8 +194,11 @@ export const DEFAULT_REPORT_SECTIONS: ReportSectionEntry[] = [
  * for an engagement that has never been configured.
  */
 export const reportConfigSchema = z.object({
-  sections: z.array(reportSectionEntrySchema).max(50).default(DEFAULT_REPORT_SECTIONS),
-  customSections: z.array(reportCustomSectionSchema).max(30).default([]),
+  sections: z
+    .array(reportSectionEntrySchema)
+    .max(MAX_REPORT_SECTION_ENTRIES)
+    .default(DEFAULT_REPORT_SECTIONS),
+  customSections: z.array(reportCustomSectionSchema).max(MAX_REPORT_CUSTOM_SECTIONS).default([]),
   /** Include every finding; otherwise only "Ready to report" findings. */
   includeAllFindings: z.boolean().default(false),
   /** Include the auto-generated evidence log in Assessment Execution. */
@@ -228,6 +233,24 @@ export const reportConfigSchema = z.object({
   readinessNa: z.array(z.string().max(80)).max(50).default([]),
 });
 export type ReportConfig = z.infer<typeof reportConfigSchema>;
+
+/**
+ * The slice of a report configuration a saved **report template** carries:
+ * everything in `reportConfigSchema` except `readinessNa`. Derived with `.omit`
+ * rather than retyped, so a field added to the report config is captured by
+ * templates automatically and the two cannot drift.
+ *
+ * `readinessNa` is excluded deliberately. It records which report-readiness
+ * checklist items *one engagement* waived as not applicable — per-engagement
+ * bookkeeping about specific items, not a reporting choice — so a template neither
+ * captures it nor disturbs the engagement's own waivers when it is applied.
+ *
+ * `.omit` preserves each surviving field's default, so
+ * `reportTemplateConfigSchema.parse({})` yields the same canonical defaults as an
+ * unconfigured engagement's `reportConfigSchema.parse({})`.
+ */
+export const reportTemplateConfigSchema = reportConfigSchema.omit({ readinessNa: true });
+export type ReportTemplateConfig = z.infer<typeof reportTemplateConfigSchema>;
 
 // ---------------------------------------------------------------------------
 // Report history + attestation letters
@@ -1106,6 +1129,55 @@ export const updateReportSettingsInput = z.object({
   footerNote: z.string().max(200).nullable().optional(),
 });
 export type UpdateReportSettingsInput = z.infer<typeof updateReportSettingsInput>;
+
+// ---------------------------------------------------------------------------
+// Report templates (site-wide library of named report configurations)
+//
+// The configuration shape itself is `reportTemplateConfigSchema`, up with the
+// report-config block it derives from; these read/write shapes live down here
+// because they reference `userSchema`, which is declared further down the file.
+// ---------------------------------------------------------------------------
+
+/**
+ * A saved report template, as returned to the web app. Templates are global — any
+ * engagement may apply one or generate with it — so there is no engagement slug on
+ * this shape. `createdBy` is null once the author has been deleted (the template
+ * survives the hard delete; the UI renders `DELETED_USER_LABEL`).
+ */
+export const reportTemplateSchema = z.object({
+  uuid: uuidSchema,
+  name: z.string(),
+  description: z.string(),
+  config: reportTemplateConfigSchema,
+  createdBy: userSchema.pick({ slug: true, firstName: true, lastName: true }).nullable(),
+  createdAt: isoDateSchema,
+  updatedAt: isoDateSchema,
+});
+export type ReportTemplate = z.infer<typeof reportTemplateSchema>;
+
+/**
+ * Save a report configuration under a name. `name` is trimmed and unique
+ * site-wide (a duplicate is a 409), since the name is the only thing that
+ * distinguishes two templates in the Reports tab.
+ */
+export const createReportTemplateInput = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: z.string().max(500).default(''),
+  config: reportTemplateConfigSchema,
+});
+export type CreateReportTemplateInput = z.infer<typeof createReportTemplateInput>;
+
+/**
+ * Rename a template, reword its description, or overwrite its configuration with
+ * the one currently configured. Every field is optional; an absent field is left
+ * as it was.
+ */
+export const updateReportTemplateInput = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  description: z.string().max(500).optional(),
+  config: reportTemplateConfigSchema.optional(),
+});
+export type UpdateReportTemplateInput = z.infer<typeof updateReportTemplateInput>;
 
 /** Outcome of importing a findings export into an engagement. */
 export const findingsImportResult = z.object({

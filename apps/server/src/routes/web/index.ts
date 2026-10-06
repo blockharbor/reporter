@@ -7,6 +7,7 @@ import { findingRoutes } from './findings.js';
 import { goalRoutes } from './goals.js';
 import { reportRoutes } from './report.js';
 import { reportSettingsRoutes } from './report-settings.js';
+import { reportTemplateRoutes } from './report-templates.js';
 import { tagRoutes } from './tags.js';
 import { categoryRoutes } from './finding-categories.js';
 import { queryRoutes } from './queries.js';
@@ -31,6 +32,7 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
   await app.register(goalRoutes);
   await app.register(reportRoutes);
   await app.register(reportSettingsRoutes);
+  await app.register(reportTemplateRoutes);
   await app.register(tagRoutes);
   await app.register(categoryRoutes);
   await app.register(queryRoutes);

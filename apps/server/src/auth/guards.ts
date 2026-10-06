@@ -1,6 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { isDateWithinSkew, parseAuthorization, verifySignature } from '@reporter/api-client';
-import { ROLE_RANK, type EngagementRole } from '@reporter/shared';
+import { ENGAGEMENT_ROLES, ROLE_RANK, type EngagementRole } from '@reporter/shared';
 import type { User } from '@prisma/client';
 import type { AuthedUser } from '../types.js';
 import { SESSION_COOKIE, resolveSession } from './session.js';
@@ -99,4 +99,45 @@ export function requireEngagementRole(minRole: EngagementRole) {
       throw new HttpError(403, 'Insufficient role for this engagement');
     }
   };
+}
+
+/**
+ * The engagement roles that count as "writes reports" for the global report-template
+ * library. Derived from `ROLE_RANK` rather than listed, so adding a role between
+ * `read` and `write` can't silently fall on the permissive side of this guard.
+ */
+const TEMPLATE_MANAGE_ROLES: EngagementRole[] = ENGAGEMENT_ROLES.filter(
+  (r) => ROLE_RANK[r] >= ROLE_RANK.write,
+);
+
+/**
+ * Requires a user who may manage the global report-template library: a site admin,
+ * or anyone holding `write`/`admin` on at least one engagement. Run after an auth
+ * guard. Mirrors `requireEngagementRole`'s error semantics — 401 when unauthed,
+ * 403 when authed but short of the bar — but takes no `:slug`, because a template
+ * belongs to no engagement.
+ *
+ * This is deliberately NOT admin-only, and should not be "tightened" to
+ * `requireAdmin`: templates are a working artifact of the people who actually
+ * write reports, and routing "save the configuration I just built" through a site
+ * admin would leave the library stale exactly when an operator needs a new entry.
+ * Using a template — listing, applying, generating with one — is gated on nothing
+ * but authentication; only managing the library passes through here.
+ */
+export async function requireReportTemplateManager(req: FastifyRequest): Promise<void> {
+  const user = req.authedUser;
+  if (!user) throw new HttpError(401, 'Not authenticated');
+  if (user.admin) return; // site admins manage every site-wide list
+
+  // One query: does this user hold a writing role on any engagement at all?
+  const writing = await req.server.db.userEngagementRole.findFirst({
+    where: { userId: user.id, role: { in: TEMPLATE_MANAGE_ROLES } },
+    select: { id: true },
+  });
+  if (!writing) {
+    throw new HttpError(
+      403,
+      'Write access on an engagement is required to manage report templates',
+    );
+  }
 }

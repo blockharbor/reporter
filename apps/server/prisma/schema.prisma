@@ -101,6 +101,10 @@ model User {
   editedEvidence Evidence[]       @relation("EvidenceLastEditor")
   evidenceComments EvidenceComment[]
   generatedReports GeneratedReport[]
+  // Report templates this user saved. SetNull on the far side, so a template
+  // outlives the hard delete of its author (consistent with the anonymizing user
+  // delete: the artifact survives, the byline becomes "Deleted user").
+  reportTemplates  ReportTemplate[]
 
   @@map("users")
 }
@@ -423,6 +427,43 @@ model ReportSettings {
   updatedAt        DateTime @updatedAt @map("updated_at")
 
   @@map("report_settings")
+}
+
+/**
+ * A named, reusable report configuration — a **report template**.
+ *
+ * Global on purpose, not engagement-scoped: the library is site-wide so a
+ * teammate on any engagement can produce the same kind of report. In lifecycle
+ * this is closest to `DefaultTag` (a flat, named, site-wide list); in permissions
+ * it is deliberately not admin-only — managing a template needs `write`/`admin`
+ * on at least one engagement, or site admin, while listing/applying/generating
+ * with one needs only authentication (see `requireReportTemplateManager`).
+ *
+ * `config` holds a `reportTemplateConfigSchema` payload (@reporter/shared): the
+ * engagement's whole `reportConfig` *except* `readinessNa`. That absence is
+ * deliberate — readiness waivers record which checklist items one engagement
+ * marked not-applicable, which is per-engagement bookkeeping rather than a
+ * reporting choice, so a template neither captures them nor touches them when it
+ * is applied. The column is re-parsed through that schema on read, so a row from
+ * an older build (or edited by hand) can't emit a shape the client doesn't expect.
+ *
+ * `name` is unique site-wide: it is how a template is referred to in the Reports
+ * tab, so two identically-named ones would be indistinguishable. `createdBy` is
+ * SetNull, which keeps the template alive when its author is hard-deleted.
+ */
+model ReportTemplate {
+  id          Int      @id @default(autoincrement())
+  uuid        String   @unique @default(uuid())
+  name        String   @unique
+  description String   @default("")
+  config      Json
+  createdById Int?     @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  createdBy User? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@map("report_templates")
 }
 
 /**

@@ -38,6 +38,13 @@ interface RecordArgs {
   eng: { id: number; slug: string; name: string };
   /** The report "type" (drives the recorded label). */
   preset: ReportPreset;
+  /**
+   * Overrides the preset-derived label. Set when a saved report template drove the
+   * generation: the row still records the preset actually rendered, but the history
+   * has to name the template instead of claiming the engagement's own configured
+   * sections produced it.
+   */
+  label?: string;
   format: GeneratedReportFormat;
   /** The exact options the report was rendered with, so the snapshot matches. */
   options: ReportOptions;
@@ -53,7 +60,7 @@ interface RecordArgs {
  */
 export async function recordGeneratedReport(
   app: FastifyInstance,
-  { eng, preset, format, options, userId, artifact }: RecordArgs,
+  { eng, preset, label, format, options, userId, artifact }: RecordArgs,
 ): Promise<void> {
   const summary = await computeReportSummary(app, eng, options);
   // Serialize per-engagement so two concurrent generations (e.g. a PDF and a ZIP
@@ -68,7 +75,7 @@ export async function recordGeneratedReport(
       data: {
         engagementId: eng.id,
         preset,
-        label: REPORT_PRESET_LABELS[preset],
+        label: label ?? REPORT_PRESET_LABELS[preset],
         version: `v${priorCount + 1}.0`,
         format,
         summary: summary as unknown as Prisma.InputJsonValue,

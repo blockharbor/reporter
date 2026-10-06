@@ -7,12 +7,14 @@ import type {
   FindingCategory,
   Engagement as DbEngagement,
   ReportSettings as DbReportSettings,
+  ReportTemplate as DbReportTemplate,
   SavedQuery as DbSavedQuery,
   Tag as DbTag,
   User as DbUser,
 } from '@prisma/client';
 import {
   reportConfigSchema,
+  reportTemplateConfigSchema,
   type ApiKey,
   type Evidence,
   type EvidenceComment,
@@ -22,6 +24,7 @@ import {
   type Engagement,
   type EngagementRole,
   type ReportSettings,
+  type ReportTemplate,
   type SavedQuery,
   type Tag,
   type User,
@@ -131,6 +134,35 @@ export function serializeReportSettings(s: DbReportSettings): ReportSettings {
     accentColor: s.accentColor,
     logoDataUri: s.logoDataUri,
     footerNote: s.footerNote,
+  };
+}
+
+/**
+ * A report template row with its author resolved. The author is a `Pick`, not a
+ * whole `DbUser`: the serialized shape only ever shows a byline, and a template is
+ * readable by anyone authenticated, so the row must not carry an email or admin
+ * flag into the response.
+ */
+type ReportTemplateWithAuthor = DbReportTemplate & {
+  createdBy: Pick<DbUser, 'slug' | 'firstName' | 'lastName'> | null;
+};
+
+export function serializeReportTemplate(t: ReportTemplateWithAuthor): ReportTemplate {
+  return {
+    uuid: t.uuid,
+    name: t.name,
+    description: t.description,
+    // Parsed, not cast: `config` is a free-form JSON column, so a row written by an
+    // older build (or edited by hand in psql) is normalized to the canonical shape
+    // here — including dropping a stray `readinessNa`, which a template never
+    // carries — rather than reaching the client as something it doesn't expect.
+    config: reportTemplateConfigSchema.parse(t.config ?? {}),
+    // Null once the author has been deleted; the template itself survives.
+    createdBy: t.createdBy
+      ? { slug: t.createdBy.slug, firstName: t.createdBy.firstName, lastName: t.createdBy.lastName }
+      : null,
+    createdAt: t.createdAt.toISOString(),
+    updatedAt: t.updatedAt.toISOString(),
   };
 }
 

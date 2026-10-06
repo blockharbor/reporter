@@ -15,8 +15,8 @@ import {
   type AttestationFramework,
   type EvidenceGrouping,
   type FindingGrouping,
-  type ReportConfig,
   type ReportPreset,
+  type ReportTemplateConfig,
   type Severity,
 } from '@reporter/shared';
 import { HttpError, requireAuth, requireEngagementRole } from '../../auth/guards.js';
@@ -27,6 +27,8 @@ import {
   type ReportOptions,
 } from '../../services/findings-report.js';
 import { importFindings } from '../../services/findings-import.js';
+import { getReportTemplateConfig } from '../../services/report-templates.js';
+import { slugify } from '../../helpers/slug.js';
 import {
   findReportForLetter,
   listReportHistory,
@@ -61,6 +63,8 @@ async function recordReport(
   args: {
     eng: { id: number; slug: string; name: string };
     preset: ReportPreset;
+    /** Overrides the preset's label in the history (a report template's name). */
+    label?: string;
     format: GeneratedReportFormat;
     options: ReportOptions;
     userId: number;
@@ -130,8 +134,16 @@ function reportOptionsFromQuery(q: Record<string, string | undefined>): ReportOp
   };
 }
 
-/** Report options from a saved report configuration (the Reports section). */
-function reportOptionsFromConfig(config: ReportConfig): ReportOptions {
+/**
+ * Report options from a saved report configuration (the Reports section).
+ *
+ * Typed `ReportTemplateConfig` — the report configuration minus `readinessNa` —
+ * because every option a report renders from is a reporting choice, and readiness
+ * waivers deliberately are not one. An engagement's live `ReportConfig` satisfies
+ * that type structurally, so the engagement's own configuration and a report
+ * template's configuration render through this one path and cannot diverge.
+ */
+function reportOptionsFromConfig(config: ReportTemplateConfig): ReportOptions {
   return {
     // Config-driven reports always include only "Ready to report" findings, and the
     // whole-engagement auto evidence log is retired — curated timeline subsections
@@ -153,7 +165,7 @@ function reportOptionsFromConfig(config: ReportConfig): ReportOptions {
  * presets render a fixed section subset (report-ready findings, no timeline).
  */
 function reportFor(
-  config: ReportConfig,
+  config: ReportTemplateConfig,
   preset: ReportPreset,
 ): { options: ReportOptions; label: string } {
   const label = REPORT_PRESET_FILE_LABELS[preset];
@@ -170,6 +182,56 @@ function reportFor(
       showEvidenceOperators: config.showEvidenceOperators,
     },
     label,
+  };
+}
+
+/**
+ * Resolve what a single generation run renders: the engagement's saved
+ * `reportConfig`, or — when `?templateUuid` names a report template — that
+ * template's configuration, for that run only.
+ *
+ * Nothing is written back to the engagement: the template's config is read and fed
+ * into the same `reportFor` path as the live config, so the Configure tab's
+ * configuration is left byte-for-byte as it was and the engagement's `readinessNa`
+ * is never touched (a template deliberately doesn't carry one). An unknown uuid
+ * 404s out of `getReportTemplateConfig` rather than quietly falling back to the
+ * engagement config — a caller that named a template must not be handed a
+ * different report than the one it asked for.
+ *
+ * Every config-driven generation route (PDF, ZIP, JSON) resolves through here, so
+ * the three cannot drift apart.
+ */
+async function reportForRun(
+  app: FastifyInstance,
+  eng: { reportConfig: unknown },
+  q: Record<string, string | undefined>,
+): Promise<{
+  options: ReportOptions;
+  /** Filename fragment naming the report type (or the template). */
+  label: string;
+  preset: ReportPreset;
+  /** Report-history label, when it should say more than the preset does. */
+  historyLabel?: string;
+}> {
+  const templateUuid = strParam(q.templateUuid);
+  if (!templateUuid) {
+    const config = reportConfigSchema.parse(eng.reportConfig ?? {});
+    const preset = presetParam(q.preset);
+    return { ...reportFor(config, preset), preset };
+  }
+
+  const { name, config: templateConfig } = await getReportTemplateConfig(app, templateUuid);
+  // A template *is* a complete report configuration, so it renders through the
+  // `custom` path; any `?preset` alongside it is ignored rather than half-applied
+  // over the top. History records the preset actually rendered (`custom`) but
+  // labels the row with the template's name — otherwise the trail would read "Your
+  // configured sections" for a report the engagement's own configuration never
+  // produced.
+  return {
+    options: reportOptionsFromConfig(templateConfig),
+    label: slugify(name) || REPORT_PRESET_FILE_LABELS.custom,
+    preset: 'custom',
+    historyLabel: `Report template: ${name}`,
   };
 }
 
@@ -345,8 +407,10 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
 
   // --- Config-driven report generation (the Reports section) ---------------
   // These use the engagement's saved `reportConfig` (ordered/toggleable sections
-  // + options) rather than query params. The legacy `/findings/*` routes above
-  // stay for the client API and back-compat.
+  // + options) rather than query params, or — with `?templateUuid=<uuid>` — a saved
+  // report template's configuration for that one run, writing nothing back to the
+  // engagement (see `reportForRun`). The legacy `/findings/*` routes above stay for
+  // the client API and back-compat.
 
   app.get(
     '/engagements/:slug/report.pdf',
@@ -355,15 +419,14 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const { slug } = req.params as { slug: string };
       const q = req.query as Record<string, string | undefined>;
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
-      const config = reportConfigSchema.parse(eng.reportConfig ?? {});
-      const preset = presetParam(q.preset);
-      const { options, label } = reportFor(config, preset);
+      const { options, label, preset, historyLabel } = await reportForRun(app, eng, q);
       const html = await buildReportHtml(app, eng, new Date(), options, req.authedUser!.id);
       const pdf = await renderPdf(app, html);
       const filename = `${slug}-${label}-${stamp()}.pdf`;
       await recordReport(app, {
         eng,
         preset,
+        label: historyLabel,
         format: 'pdf',
         options,
         userId: req.authedUser!.id,
@@ -383,9 +446,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const { slug } = req.params as { slug: string };
       const q = req.query as Record<string, string | undefined>;
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
-      const config = reportConfigSchema.parse(eng.reportConfig ?? {});
-      const preset = presetParam(q.preset);
-      const { options, label } = reportFor(config, preset);
+      const { options, label, preset, historyLabel } = await reportForRun(app, eng, q);
       const files = await gatherSupportingFiles(app, eng);
       const html = await buildReportHtml(app, eng, new Date(), options, req.authedUser!.id, files);
       const pdf = await renderPdf(app, html);
@@ -417,6 +478,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       await recordReport(app, {
         eng,
         preset,
+        label: historyLabel,
         format: 'zip',
         options,
         userId: req.authedUser!.id,
@@ -436,9 +498,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const { slug } = req.params as { slug: string };
       const q = req.query as Record<string, string | undefined>;
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
-      const config = reportConfigSchema.parse(eng.reportConfig ?? {});
-      const preset = presetParam(q.preset);
-      const { options, label } = reportFor(config, preset);
+      const { options, label, preset, historyLabel } = await reportForRun(app, eng, q);
       // Deliberately no `includeExcludedEvidence` here, unlike
       // `/findings/export.json`. This route is a *generated report* in the chosen
       // preset: it carries that preset's label, it is recorded in report history,
@@ -458,6 +518,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       await recordReport(app, {
         eng,
         preset,
+        label: historyLabel,
         format: 'json',
         options,
         userId: req.authedUser!.id,

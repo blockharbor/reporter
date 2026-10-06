@@ -40,9 +40,7 @@ import {
   DEFAULT_REPORT_SECTIONS,
   FINDING_GROUPINGS,
   FINDING_GROUPING_LABELS,
-  REPORT_PRESETS,
-  REPORT_PRESET_HINTS,
-  REPORT_PRESET_LABELS,
+  MAX_REPORT_CUSTOM_SECTIONS,
   REPORT_SECTION_HINTS,
   REPORT_SECTION_ITEMS,
   REPORT_SECTION_LABELS,
@@ -56,7 +54,6 @@ import {
   type GeneratedReport,
   type ReportConfig,
   type ReportCustomSection,
-  type ReportPreset,
   type ReportSection,
   type ReportSectionEntry,
   type ReportSectionItem,
@@ -66,6 +63,7 @@ import {
   useEngagement,
   useFindings,
   useReportHistory,
+  useReportTemplates,
   useUpdateEngagement,
 } from '../api/hooks.js';
 import { useEngagementPermissions } from '../lib/permissions.js';
@@ -74,6 +72,14 @@ import { computeFindingWarnings, computeReadiness } from '../lib/report-readines
 import { SaveStatusIndicator } from '../components/SaveStatusIndicator.js';
 import { ReportContentForm } from '../components/engagement/ReportContentForm.js';
 import { SectionPreview } from '../components/engagement/SectionPreview.js';
+import {
+  DEFAULT_GENERATE_TARGET,
+  ReportTargetField,
+  ReportTemplateControls,
+  type GenerateTarget,
+} from '../components/engagement/ReportTemplateControls.js';
+import { customIdOf, customSectionKey, sectionLabel } from '../lib/report-sections.js';
+import { templateSanitizeWarning } from '../lib/report-templates.js';
 import { downloadFile } from '../lib/download.js';
 import { EXCLUDED_FROM_REPORT_LABEL } from '../components/evidence/ExcludedFromReportBadge.js';
 
@@ -107,28 +113,24 @@ function makeCustomId(): string {
   return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-/** The custom id encoded in a `custom:<id>` section key, or null for built-ins. */
-function customIdOf(key: string): string | null {
-  return key.startsWith('custom:') ? key.slice('custom:'.length) : null;
-}
-
 /** Human label + hint for a section entry (built-in or custom). */
 function sectionMeta(
   entry: ReportSectionEntry,
   customSections: ReportCustomSection[],
 ): { label: string; hint: string; missing: boolean } {
+  const label = sectionLabel(entry.key, customSections);
   const cid = customIdOf(entry.key);
-  if (cid) {
-    const custom = customSections.find((c) => c.id === cid);
+  if (cid !== null) {
     return {
-      label: custom?.title || 'Custom section',
+      label,
       hint: 'A free-text section you authored below.',
-      missing: !custom,
+      // A `custom:` entry whose section has been deleted: still listed, flagged.
+      missing: !customSections.some((c) => c.id === cid),
     };
   }
   const key = entry.key as ReportSection;
   return {
-    label: REPORT_SECTION_LABELS[key] ?? entry.key,
+    label,
     hint: REPORT_SECTION_HINTS[key] ?? '',
     missing: !(entry.key in REPORT_SECTION_LABELS),
   };
@@ -258,9 +260,30 @@ export function ReportsPage() {
   const [downloadingUuid, setDownloadingUuid] = useState<string | null>(null);
   // Report history collapses to the most recent few until expanded.
   const [showAllHistory, setShowAllHistory] = useState(false);
-  // Report "type": `custom` renders the configured sections; the others are
-  // canned subsets. Drives the exported filename (`<slug>-<type>-<time>.<ext>`).
-  const [preset, setPreset] = useState<ReportPreset>('custom');
+  // What Generate renders: a built-in preset (`custom` = this engagement's
+  // configured sections, the others canned subsets) or a saved report template.
+  // Drives the exported filename (`<slug>-<type|template>-<time>.<ext>`).
+  const [target, setTarget] = useState<GenerateTarget>(DEFAULT_GENERATE_TARGET);
+  // The template library is global; the Configure tab's controls read the same
+  // cache entry. Only the chooser and the warnings below need it here.
+  const {
+    data: templates = [],
+    isLoading: templatesLoading,
+    isError: templatesError,
+    refetch: refetchTemplates,
+  } = useReportTemplates();
+  const selectedTemplate =
+    target.kind === 'template' ? templates.find((t) => t.uuid === target.uuid) : undefined;
+  // Clamp to a target that still exists: someone else may have deleted the chosen
+  // template between the pick and the click (same reason `effSignatoryIdx` clamps).
+  const effTarget: GenerateTarget =
+    target.kind === 'template' && !selectedTemplate ? DEFAULT_GENERATE_TARGET : target;
+  // A template that would un-sanitize this engagement's report. Computed against
+  // the live config, so it says what this run would reveal that the Configure tab
+  // currently hides — the same comparison the Apply confirm makes.
+  const targetSanitizeWarning = selectedTemplate
+    ? templateSanitizeWarning(config, selectedTemplate.config)
+    : null;
 
   async function generate(format: 'pdf' | 'zip' | 'json') {
     // Flush any pending config edit so the report reflects the latest options.
@@ -280,20 +303,50 @@ export function ReportsPage() {
         `${findingWarnings.findingCount} finding${findingWarnings.findingCount === 1 ? '' : 's'} marked “Ready to report” will render incomplete.`,
       );
     }
-    if (problems.length > 0) {
+    // A third gate, and a different kind: generating with a template that turns a
+    // sanitize option on puts evidence capture times and/or operator names into a
+    // client deliverable. It rides in the same prompt (one confirm per click) but as
+    // its own warning-toned line, never folded into the soft-gate sentence above.
+    if (problems.length > 0 || targetSanitizeWarning) {
       const ok = await confirm({
-        title: readiness.ready ? 'Some findings will render incomplete' : 'Report not marked ready',
-        message: `${problems.join(' ')} Generate anyway?`,
+        title: targetSanitizeWarning
+          ? 'This template shows evidence details'
+          : readiness.ready
+            ? 'Some findings will render incomplete'
+            : 'Report not marked ready',
+        message: (
+          <span className="block space-y-2">
+            {targetSanitizeWarning && (
+              <span className="block text-warning">{targetSanitizeWarning}</span>
+            )}
+            <span className="block">
+              {problems.length > 0 ? `${problems.join(' ')} ` : ''}Generate anyway?
+            </span>
+          </span>
+        ),
         confirmLabel: 'Generate anyway',
       });
       if (!ok) return;
     }
     setBusy(format);
     try {
-      const url = `/web/engagements/${slug}/report.${format}?preset=${preset}`;
-      // The server sets the authoritative filename (type + timestamp); this is
-      // only a fallback if the Content-Disposition header is missing.
-      await downloadFile(url, `${slug}-${preset}-report.${format}`);
+      // A template is a complete configuration, so it replaces `preset` rather than
+      // combining with it, and it is used for this run only — nothing is written
+      // back to the engagement's own report configuration.
+      const params = new URLSearchParams(
+        effTarget.kind === 'template'
+          ? { templateUuid: effTarget.uuid }
+          : { preset: effTarget.preset },
+      );
+      const url = `/web/engagements/${slug}/report.${format}?${params.toString()}`;
+      // The server sets the authoritative filename (the report type or the
+      // template's name, plus a timestamp); this is only a fallback if the
+      // Content-Disposition header is missing.
+      const fallbackName =
+        effTarget.kind === 'template'
+          ? `${slug}-report.${format}`
+          : `${slug}-${effTarget.preset}-report.${format}`;
+      await downloadFile(url, fallbackName);
       // Every generation (PDF, ZIP, and JSON) is logged server-side with its
       // stored bytes; refresh history so the new entry and its Download button
       // appear. PDF/ZIP entries also unlock the attestation letter.
@@ -473,7 +526,7 @@ export function ReportsPage() {
     setConfig((c) => ({
       ...c,
       customSections: [...c.customSections, { id, title: 'New section', body: '' }],
-      sections: [...c.sections, { key: `custom:${id}`, enabled: true }],
+      sections: [...c.sections, { key: customSectionKey(id), enabled: true }],
     }));
   }
 
@@ -490,6 +543,18 @@ export function ReportsPage() {
       customSections: c.customSections.filter((s) => s.id !== id),
       sections: c.sections.filter((s) => customIdOf(s.key) !== id),
     }));
+  }
+
+  /**
+   * Adopt a report template's configuration (already merged with this engagement's
+   * by `ReportTemplateControls`, which also owns the confirm). Writing it to the
+   * form is all that's needed — the autosave above persists it like any other edit.
+   */
+  function applyTemplateConfig(next: ReportConfig) {
+    setConfig(next);
+    // The preview may have been pointing at a section the template leaves out, so
+    // re-aim it at the first section the applied configuration actually renders.
+    setPreviewKey(next.sections.find((s) => s.enabled)?.key ?? null);
   }
 
   const busyAny = busy !== null;
@@ -605,6 +670,17 @@ export function ReportsPage() {
                   </DndContext>
                 </Card>
 
+                {/* Report templates — save this configuration under a name, or
+                    replace it with a saved one. Sits with the Sections panel
+                    because that panel is most of what a template carries. */}
+                <ReportTemplateControls
+                  config={config}
+                  canSave={canWrite}
+                  canApply={canEdit}
+                  onApply={applyTemplateConfig}
+                  onFlush={flush}
+                />
+
                 {/* Custom sections editor */}
                 <Card className="space-y-3 p-4">
                   <div className="flex items-center justify-between gap-2">
@@ -619,7 +695,9 @@ export function ReportsPage() {
                       size="sm"
                       variant="secondary"
                       onClick={addCustomSection}
-                      disabled={readOnly || config.customSections.length >= 30}
+                      disabled={
+                        readOnly || config.customSections.length >= MAX_REPORT_CUSTOM_SECTIONS
+                      }
                     >
                       Add section
                     </Button>
@@ -760,23 +838,20 @@ export function ReportsPage() {
                       .
                     </p>
                   )}
-                  <Field label="Report type" htmlFor="rp-preset" hint={REPORT_PRESET_HINTS[preset]}>
-                    <Select
-                      id="rp-preset"
-                      value={preset}
-                      onChange={(e) => setPreset(e.target.value as ReportPreset)}
-                    >
-                      {REPORT_PRESETS.map((p) => (
-                        <option key={p} value={p}>
-                          {REPORT_PRESET_LABELS[p]}
-                        </option>
-                      ))}
-                    </Select>
-                  </Field>
+                  <ReportTargetField
+                    target={effTarget}
+                    onChange={setTarget}
+                    templates={templates}
+                    isLoading={templatesLoading}
+                    isError={templatesError}
+                    onRetry={() => void refetchTemplates()}
+                    config={config}
+                    onConfigure={() => setSection('configure')}
+                  />
                   <p className="text-xs text-muted">
                     The ZIP bundle wraps the PDF with its supporting files; JSON exports the
                     report-ready findings and can be re-imported later. The file is named for the
-                    report type and the moment it was generated.
+                    report type — or the report template — and the moment it was generated.
                   </p>
                   <div className="flex flex-col gap-2">
                     <Button

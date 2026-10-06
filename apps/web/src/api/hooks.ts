@@ -9,6 +9,7 @@ import type {
   CreateFindingInput,
   CreateEngagementInput,
   CreateGoalInput,
+  CreateReportTemplateInput,
   CreateTagInput,
   CreateTargetInput,
   Evidence,
@@ -26,6 +27,7 @@ import type {
   Engagement,
   LinkedGoal,
   ReportSettings,
+  ReportTemplate,
   SavedQuery,
   Tag,
   Target,
@@ -34,6 +36,7 @@ import type {
   UpdateFindingEvidenceInput,
   UpdateGoalInput,
   UpdateReportSettingsInput,
+  UpdateReportTemplateInput,
   UpdateTargetInput,
   User,
 } from '@reporter/shared';
@@ -937,5 +940,80 @@ export function useUpdateReportSettings() {
     mutationFn: (patch: UpdateReportSettingsInput) =>
       api.put<ReportSettings>('/web/admin/report-settings', patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['report-settings'] }),
+  });
+}
+
+// --- Report templates (site-wide library of named report configurations) ---
+//
+// A report template is a saved report configuration (everything in an
+// engagement's `reportConfig` except `readinessNa`) that any engagement can
+// apply or generate with. Templates are GLOBAL, so none of these hooks closes
+// over an engagement slug and the cache key carries none either — the Reports
+// tab of every engagement reads the same list.
+//
+// Applying a template is not one of these mutations: it writes the engagement's
+// live `reportConfig`, which is `useUpdateEngagement(slug)`. Generating one
+// report from a template is a plain download (`report.{pdf,zip,json}?templateUuid=`),
+// built where the Generate tab builds its other URLs; neither touches the library.
+
+/**
+ * Query key for the report-template library — one flat, slug-free key, the same
+ * shape the other global resources use (`['report-settings']`, `['admin-users']`).
+ * Exported so a page that needs to refresh the library by hand reuses it instead
+ * of re-spelling the string; the three mutations below invalidate it themselves.
+ */
+export const reportTemplatesKey = ['report-templates'];
+
+/** The template library, name-ascending. Any signed-in user may read it. */
+export const useReportTemplates = () =>
+  useQuery({
+    queryKey: reportTemplatesKey,
+    queryFn: () => api.get<ReportTemplate[]>('/web/report-templates'),
+  });
+
+/**
+ * Save a report configuration under a name. The caller passes the configuration
+ * to snapshot (normally the engagement's live config, which structurally
+ * satisfies `ReportTemplateConfig` — the omitted `readinessNa` is simply not
+ * read). Managing the library needs write or admin on some engagement, or site
+ * admin: a 403 from the server means the user may use templates but not change
+ * them. A name already in the library is a 409 — surface `ApiError.message`,
+ * which carries the server's wording.
+ */
+export function useCreateReportTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateReportTemplateInput) =>
+      api.post<ReportTemplate>('/web/report-templates', input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: reportTemplatesKey }),
+  });
+}
+
+/**
+ * Rename a template, reword its description, or overwrite its configuration with
+ * the one currently configured. Every field of the patch is optional and an
+ * absent field is left as it was, so one hook serves all three edits. The uuid
+ * travels with the call (not the hook) so a list of templates needs one instance.
+ */
+export function useUpdateReportTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { uuid: string; patch: UpdateReportTemplateInput }) =>
+      api.put<ReportTemplate>(`/web/report-templates/${args.uuid}`, args.patch),
+    onSuccess: () => qc.invalidateQueries({ queryKey: reportTemplatesKey }),
+  });
+}
+
+/**
+ * Delete a template. Nothing holds a reference to it afterwards: applying a
+ * template copies its configuration into the engagement, and a report generated
+ * from one recorded the template's name in its history label at generation time —
+ * so this removes it from the library only, and no other query goes stale.
+ */
+export function useDeleteReportTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (uuid: string) => api.del(`/web/report-templates/${uuid}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: reportTemplatesKey }),
   });
 }

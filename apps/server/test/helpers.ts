@@ -17,6 +17,7 @@ const TABLES = [
   'findings',
   'finding_categories',
   'generated_reports',
+  'report_templates',
   'saved_queries',
   'tags',
   'default_tags',

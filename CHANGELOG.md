@@ -10,6 +10,39 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ### Added
 
+- **Report templates — a site-wide library of named report configurations.** Save
+  the configuration you built on **Reports → Configure** under a name, and any
+  engagement can reproduce the same kind of report. A template captures the section
+  selection and order, every per-section option, the custom sections (titles and
+  bodies, so a `custom:` section entry still resolves), the findings grouping, and
+  the evidence-log and sanitize choices. It deliberately does **not** capture the
+  engagement's report-readiness **"Not applicable"** marks — those are bookkeeping
+  about one engagement's checklist, not a reporting choice — and applying a template
+  never touches them.
+- **Apply a template, or generate one report from it.** **Apply** (behind a confirm,
+  because it overwrites) copies a template into this engagement's own configuration;
+  the template's custom sections are **merged**, not substituted — the template's
+  version wins when an id collides, and your own custom sections the template never
+  references are kept, listed switched off so nothing is deleted and nothing appears
+  in the report uninvited. On **Reports → Generate & History**, templates sit beside
+  the built-in report types: generating with one uses its configuration **for that
+  report only** and leaves the engagement's own configuration exactly as it was. The
+  download and the **Report history** row are named for the template.
+- **A template that would un-sanitize a report says so first.** `Show evidence
+timestamps` and `Show evidence operators` decide whether evidence capture times and
+  operator identities reach a client deliverable, and both are off by default, so a
+  template that would switch either on names exactly what it would reveal — in the
+  apply confirm, under the Generate chooser, and in the confirm before the report is
+  produced. Every template is badged **Sanitized** or **Shows timestamps + operator
+  names** wherever it is listed.
+- **Admin → Report templates** curates the library: each row shows how much of the
+  report the template turns on (with the enabled section names on hover), its
+  sanitize state, who saved it and when, and offers rename/reword and delete.
+  Deleting a template leaves every engagement that applied it — and every report
+  already generated from it — untouched, because applying copies rather than links.
+  Saving, renaming and deleting a template needs **write access on at least one
+  engagement** (or site admin); listing, applying and generating with one needs only
+  an account.
 - **Exclude a piece of evidence from reports.** Each piece of evidence gets a
   **Report** card with an **Exclude from reports** checkbox. Excluded evidence is
   left out of _every_ report output — all six PDF inclusion paths, the

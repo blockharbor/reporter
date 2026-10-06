@@ -19,6 +19,7 @@ import {
   TagChip,
   Tbody,
   Td,
+  Textarea,
   Th,
   Thead,
   Tr,
@@ -35,7 +36,10 @@ import {
   type AdminEngagement,
   type AdminUser,
   type EngagementStatus,
+  type ReportTemplate,
+  type ReportTemplateConfig,
   type UpdateReportSettingsInput,
+  type UpdateReportTemplateInput,
 } from '@reporter/shared';
 import { api } from '../api/client.js';
 import { useAuth } from '../auth.js';
@@ -43,18 +47,24 @@ import {
   useAdminEngagements,
   useCreateUser,
   useDeleteEngagement,
+  useDeleteReportTemplate,
   useDeleteUser,
   useGenerateRecoveryLink,
   useReportSettings,
+  useReportTemplates,
   useResetTotp,
   useRevokeUserApiKey,
   useUpdateReportSettings,
+  useUpdateReportTemplate,
   useUpdateUser,
   useUserApiKeys,
   useUsers,
 } from '../api/hooks.js';
 import { formatDate, formatDateTime } from '../lib/format.js';
 import { copyToClipboard } from '../lib/clipboard.js';
+import { sectionLabel } from '../lib/report-sections.js';
+import { userDisplayName } from '../lib/user-display.js';
+import { TemplateSanitizeBadge } from '../components/engagement/TemplateSanitizeBadge.js';
 
 export function AdminPage() {
   const [tab, setTab] = useState('users');
@@ -70,12 +80,14 @@ export function AdminPage() {
           { key: 'default-tags', label: 'Default tags' },
           { key: 'engagements', label: 'Engagements' },
           { key: 'branding', label: 'Report branding' },
+          { key: 'report-templates', label: 'Report templates' },
         ]}
       />
       {tab === 'users' && <UsersTab />}
       {tab === 'default-tags' && <DefaultTagsTab />}
       {tab === 'engagements' && <EngagementsTab />}
       {tab === 'branding' && <ReportBrandingTab />}
+      {tab === 'report-templates' && <ReportTemplatesTab />}
     </div>
   );
 }
@@ -1055,5 +1067,293 @@ function ReportBrandingTab() {
         Save branding
       </Button>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Report templates — the site-wide library of saved report configurations
+// ---------------------------------------------------------------------------
+
+/**
+ * How much of the report a template turns on — "5 of 9", with the enabled section
+ * names on hover, so two templates can be told apart without opening either.
+ * Counted from the stored configuration rather than from a saved tally, so a
+ * template written before a section existed still counts honestly.
+ */
+function TemplateSectionsCell({ config }: { config: ReportTemplateConfig }) {
+  const enabled = config.sections.filter((s) => s.enabled);
+  const customCount = config.customSections.length;
+  return (
+    <div
+      title={
+        enabled.length === 0
+          ? 'No sections enabled — a report from this template would carry only its cover pages.'
+          : `Enabled: ${enabled.map((s) => sectionLabel(s.key, config.customSections)).join(', ')}`
+      }
+    >
+      <span className="tabular-nums">
+        {enabled.length} of {config.sections.length}
+      </span>
+      {/* Custom sections travel inside the template, so they're worth counting
+          separately: they're the part of a template that isn't reproducible from
+          this build's section list. */}
+      {customCount > 0 && (
+        <span className="block text-xs text-muted">
+          {customCount} custom section{customCount === 1 ? '' : 's'}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The report-template library. A template is global — any engagement can apply one
+ * or generate a single report from one — so it is curated here, alongside the other
+ * site-wide lists (default tags, report branding) rather than inside one engagement.
+ *
+ * Nothing here is gated client-side. The server's rule for changing the library is
+ * write (or admin) on at least one engagement, or site admin — deliberately not
+ * site admin alone — and this page has no cheap way to learn whether someone holds
+ * a write role somewhere, so the controls stay live and a refusal is surfaced in
+ * the server's own words. In practice every visitor already passes that rule, since
+ * App.tsx routes `/admin` for site admins only; the operators who actually write
+ * reports save and apply templates from an engagement's Reports tab instead.
+ */
+function ReportTemplatesTab() {
+  const { data: templates, isLoading, isError, refetch } = useReportTemplates();
+  const removeTemplate = useDeleteReportTemplate();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [editing, setEditing] = useState<ReportTemplate | null>(null);
+
+  /**
+   * A plain confirm, not a type-the-name one: deleting a template destroys no
+   * report and no configuration — only the library entry — and the same settings
+   * can be saved again from any engagement that still has them.
+   */
+  async function confirmDelete(t: ReportTemplate) {
+    const ok = await confirm({
+      title: 'Delete report template',
+      message: (
+        <span className="block space-y-2">
+          <span className="block">
+            Delete the report template <span className="font-semibold">{t.name}</span>?
+          </span>
+          <span className="block">
+            Applying a template copies its settings into the engagement rather than linking to it,
+            so every engagement that already applied this one keeps its report configuration, and
+            reports already generated from it keep their history entry. Only the library entry goes.
+          </span>
+          <span className="block">
+            Any engagement still configured this way can save it again from Reports → Configure.
+          </span>
+        </span>
+      ),
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await removeTemplate.mutateAsync(t.uuid);
+      toast.success('Report template deleted');
+    } catch (err) {
+      // A 403 here is the server's write-to-manage rule talking, and it words the
+      // requirement precisely — pass it through rather than guess at the reason.
+      toast.error(err instanceof Error ? err.message : 'Could not delete the report template');
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="max-w-3xl space-y-1">
+        <p className="text-sm text-muted">
+          A report template is a saved report configuration: which sections are in, their order and
+          per-section options, any custom sections, and how evidence and findings are grouped. Any
+          engagement can apply one to its own configuration, or generate a single report from one
+          without changing anything. The library is shared site-wide.
+        </p>
+        <p className="text-xs text-muted">
+          Saving, renaming and deleting a template needs write access to at least one engagement, so
+          the operators who write reports curate this list, not site admins alone; applying one, or
+          generating with one, needs only an account. A template never carries an engagement’s
+          report-readiness “not applicable” marks — those stay with the engagement that made them.
+        </p>
+      </div>
+      {isLoading ? (
+        <Spinner />
+      ) : isError ? (
+        <ErrorState description="Couldn’t load report templates." onRetry={() => refetch()} />
+      ) : !templates || templates.length === 0 ? (
+        <EmptyState
+          title="No report templates yet"
+          description="Templates are saved from an engagement, not from here: open Reports → Configure, set the report up the way you want it, then choose “Save as template”. It appears in this library for every engagement to apply."
+          action={
+            <Link to="/engagements" className="text-sm font-medium text-accent hover:underline">
+              Go to engagements
+            </Link>
+          }
+        />
+      ) : (
+        <Table>
+          <Thead>
+            <Tr>
+              <Th>Template</Th>
+              <Th>Sections</Th>
+              <Th>Sanitize</Th>
+              <Th>Created by</Th>
+              <Th>Updated</Th>
+              <Th />
+            </Tr>
+          </Thead>
+          <Tbody>
+            {templates.map((t) => (
+              <Tr key={t.uuid}>
+                <Td>
+                  <div className="font-medium text-text">{t.name}</div>
+                  {t.description && (
+                    <div className="max-w-md text-xs text-muted">{t.description}</div>
+                  )}
+                </Td>
+                <Td className="whitespace-nowrap">
+                  <TemplateSectionsCell config={t.config} />
+                </Td>
+                <Td>
+                  <TemplateSanitizeBadge config={t.config} />
+                </Td>
+                {/* The author survives their own deletion as the shared stand-in
+                    byline — the template outlives the account that saved it. */}
+                <Td className="text-muted">{userDisplayName(t.createdBy)}</Td>
+                <Td
+                  className="whitespace-nowrap text-muted"
+                  title={`Saved ${formatDateTime(t.createdAt)}`}
+                >
+                  {formatDateTime(t.updatedAt)}
+                </Td>
+                <Td className="text-right">
+                  <div className="flex justify-end gap-1">
+                    <Button variant="ghost" size="sm" onClick={() => setEditing(t)}>
+                      Edit
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-danger"
+                      loading={removeTemplate.isPending && removeTemplate.variables === t.uuid}
+                      onClick={() => confirmDelete(t)}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </Td>
+              </Tr>
+            ))}
+          </Tbody>
+        </Table>
+      )}
+      <EditReportTemplateModal template={editing} onClose={() => setEditing(null)} />
+    </div>
+  );
+}
+
+/**
+ * Rename a template or reword its description. The configuration itself isn't
+ * editable here, deliberately: it is a snapshot of a real engagement's live report
+ * configuration, so it is replaced by saving over the template from Reports →
+ * Configure, where there is a configuration to snapshot and a preview to check it
+ * against.
+ */
+function EditReportTemplateModal({
+  template,
+  onClose,
+}: {
+  template: ReportTemplate | null;
+  onClose: () => void;
+}) {
+  const update = useUpdateReportTemplate();
+  const toast = useToast();
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+
+  // Seed the form from whichever row was opened, and re-seed when another row is
+  // opened or the same one is reopened after an abandoned edit.
+  useEffect(() => {
+    if (template) {
+      setName(template.name);
+      setDescription(template.description);
+    }
+  }, [template]);
+
+  /**
+   * Only the fields that actually changed are sent. Every field of the patch is
+   * optional, and an empty save would still bump `updatedAt` (the server stamps it
+   * on every write), which would make the Updated column claim an edit that never
+   * happened. Both values are compared trimmed because the server trims the name.
+   */
+  const trimmedName = name.trim();
+  const trimmedDescription = description.trim();
+  const patch: UpdateReportTemplateInput = {
+    ...(template && trimmedName !== template.name ? { name: trimmedName } : {}),
+    ...(template && trimmedDescription !== template.description
+      ? { description: trimmedDescription }
+      : {}),
+  };
+  const dirty = Object.keys(patch).length > 0;
+
+  async function save() {
+    if (!template) return;
+    try {
+      await update.mutateAsync({ uuid: template.uuid, patch });
+      toast.success('Report template updated');
+      onClose();
+    } catch (err) {
+      // 409 (the name is already in the library) and 403 (not a template manager)
+      // both arrive worded by the server; show that instead of a generic failure.
+      toast.error(err instanceof Error ? err.message : 'Could not update the report template');
+    }
+  }
+
+  return (
+    <Modal
+      open={Boolean(template)}
+      onClose={onClose}
+      title="Edit report template"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={save} loading={update.isPending} disabled={!trimmedName || !dirty}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        {/* The caps mirror `updateReportTemplateInput`, so the field fills up
+            rather than the save failing validation. */}
+        <Field label="Name" htmlFor="rt-name" hint="Unique across the library." required>
+          <Input
+            id="rt-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            maxLength={120}
+            autoFocus
+          />
+        </Field>
+        <Field
+          label="Description"
+          htmlFor="rt-description"
+          hint="What this template is for — what a teammate needs to know before applying it."
+        >
+          <Textarea
+            id="rt-description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            maxLength={500}
+            placeholder="Client-facing deliverable: findings and executive summary only, evidence sanitized."
+          />
+        </Field>
+      </div>
+    </Modal>
   );
 }
