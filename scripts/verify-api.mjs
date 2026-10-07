@@ -41,7 +41,12 @@ try {
   } else {
     const created = await client.createEvidence(
       slug,
-      { contentType: 'image', description: 'verify-api smoke test', tagIds: [] },
+      {
+        contentType: 'image',
+        title: 'verify-api smoke test',
+        description: 'verify-api smoke test',
+        tagIds: [],
+      },
       { filename: 'smoke.png', contentType: 'image/png', data: PNG },
     );
     check('createEvidence returns a uuid', Boolean(created.uuid), created.uuid);

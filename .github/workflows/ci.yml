@@ -59,3 +59,22 @@ jobs:
 
       - name: Server integration tests
         run: pnpm --filter @reporter/server test
+
+  # The desktop app is excluded from the job above (its install pulls an Electron
+  # binary), so nothing type-checked it and a type error could reach a release
+  # tag unnoticed — `electron-vite build` transpiles with esbuild and does not
+  # type-check. This job is type-check only: no Electron download, no packaging.
+  desktop-typecheck:
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter "@reporter/desktop..."
+      - run: pnpm --filter "@reporter/shared" --filter "@reporter/ui" --filter "@reporter/api-client" build
+      - run: pnpm --filter @reporter/desktop exec tsc --noEmit

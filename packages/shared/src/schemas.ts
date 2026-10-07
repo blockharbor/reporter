@@ -870,6 +870,18 @@ export const createEvidenceInput = z.object({
   excludeFromReport: z.boolean().default(false),
 });
 export type CreateEvidenceInput = z.infer<typeof createEvidenceInput>;
+/**
+ * What a *caller* has to supply to create evidence — the schema's INPUT type, so
+ * fields carrying a `.default()` are optional.
+ *
+ * `CreateEvidenceInput` is the output type, where a defaulted field is required.
+ * That is right for the server, which reads a parsed payload, and wrong for a
+ * client building one: adding `excludeFromReport: z.boolean().default(false)` was
+ * a backward-compatible change on the wire, yet it broke the desktop and
+ * terminal apps at compile time until both were edited to pass a value the
+ * server would have supplied anyway. Clients take this type instead.
+ */
+export type CreateEvidenceInputArg = z.input<typeof createEvidenceInput>;
 
 /**
  * Partial update of a piece of evidence's editable metadata. Every field is

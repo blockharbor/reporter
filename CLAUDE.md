@@ -52,7 +52,7 @@ Project skills automate the rest: `/run-stack`, `/db-reset`, `/verify-api`, `/re
 
 ## Versioning & releases
 
-- **One version for the whole monorepo.** Root + every `packages/*` and `apps/*` `package.json` share a single [SemVer](https://semver.org) number (currently `0.1.0`). Don't hand-edit version fields — they drift.
+- **One version for the whole monorepo.** Root + every `packages/*` and `apps/*` `package.json` share a single [SemVer](https://semver.org) number (currently `0.9.0`). Don't hand-edit version fields — they drift.
 - **Bump in lockstep:** `pnpm run version:bump <major|minor|patch|X.Y.Z>` (`scripts/bump-version.mjs`). It rewrites every workspace version, updates the `reporter-term` `.version()` literal, and opens a dated `CHANGELOG.md` section. Add `--commit` to also commit and create the `vX.Y.Z` tag.
 - **Record changes in `CHANGELOG.md`** (Keep a Changelog format) under `## [Unreleased]` as you work; the bump promotes them.
 - **Releasing:** pushing a `vX.Y.Z` tag triggers `.github/workflows/release.yml`, which builds the desktop installers per-OS and the `reporter-term` tarball. The server Docker image is tagged with the same version (`/release` skill).

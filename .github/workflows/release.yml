@@ -14,7 +14,25 @@ permissions:
   contents: write
 
 jobs:
+  # Gate the installers on the test suite. A tag push previously went straight to
+  # packaging, so a release could be cut from a commit whose tests were failing —
+  # CI runs on pull requests, which a tag push is not.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter "@reporter/web..." --filter "@reporter/server..." --filter "@reporter/term..."
+      - run: pnpm --filter "@reporter/shared" --filter "@reporter/ui" --filter "@reporter/api-client" build
+      - run: pnpm lint
+      - run: pnpm test
+
   desktop:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -81,6 +99,7 @@ jobs:
             apps/desktop/release/*.deb
 
   terminal:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

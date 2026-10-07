@@ -88,11 +88,18 @@ const termIndex = join(root, 'apps/term/src/index.ts');
 if (existsSync(termIndex)) {
   const src = readFileSync(termIndex, 'utf8');
   const updated = src.replace(/(\.version\(')\d+\.\d+\.\d+('\))/, `$1${next}$2`);
-  if (updated !== src) {
-    writeFileSync(termIndex, updated);
-    changed.push('apps/term/src/index.ts');
-    console.log('  apps/term/src/index.ts (.version literal)');
+  if (updated === src) {
+    // Silence here is how a version literal drifts: the file still exists, the
+    // regex quietly stops matching after a refactor, and the release ships a CLI
+    // reporting the wrong version. Fail the bump instead.
+    throw new Error(
+      'bump: could not find the .version() literal in apps/term/src/index.ts — ' +
+        'update the regex in scripts/bump-version.mjs or the literal in that file.',
+    );
   }
+  writeFileSync(termIndex, updated);
+  changed.push('apps/term/src/index.ts');
+  console.log('  apps/term/src/index.ts (.version literal)');
 }
 
 // Open a dated CHANGELOG section under Unreleased.
@@ -101,11 +108,15 @@ if (existsSync(changelogPath)) {
   const today = new Date().toISOString().slice(0, 10);
   const cl = readFileSync(changelogPath, 'utf8');
   const marker = '## [Unreleased]';
-  if (cl.includes(marker) && !cl.includes(`## [${next}]`)) {
-    writeFileSync(changelogPath, cl.replace(marker, `${marker}\n\n## [${next}] - ${today}`));
-    changed.push('CHANGELOG.md');
-    console.log(`  CHANGELOG.md (## [${next}] - ${today})`);
+  if (!cl.includes(marker)) {
+    throw new Error(`bump: CHANGELOG.md has no "${marker}" heading to open a release under.`);
   }
+  if (cl.includes(`## [${next}]`)) {
+    throw new Error(`bump: CHANGELOG.md already has a "## [${next}]" section.`);
+  }
+  writeFileSync(changelogPath, cl.replace(marker, `${marker}\n\n## [${next}] - ${today}`));
+  changed.push('CHANGELOG.md');
+  console.log(`  CHANGELOG.md (## [${next}] - ${today})`);
 }
 
 if (doCommit) {

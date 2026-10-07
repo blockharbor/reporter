@@ -200,6 +200,21 @@ timestamps` and `Show evidence operators` decide whether evidence capture times 
   `Popover`. Both primitives are now covered by regression tests that run against a
   real DOM and fail against the old focus behaviour.
 
+- **The server reported the wrong version to clients.** `/api/checkconnection`
+  advertised `0.1.0` while every package manifest said `0.9.0` — the constant was
+  a hand-written literal and the version-bump script never knew about it. It is
+  now read from the package manifest, so it cannot drift, and a test pins the
+  agreement. The bump script also fails loudly instead of silently skipping when
+  it cannot find the `reporter-term` version literal or the CHANGELOG heading,
+  which is how the drift went unnoticed for eight minors.
+- **`@reporter/api-client` now takes the schema's input type when creating
+  evidence**, so a server-side field with a default no longer breaks client
+  builds. Adding `excludeFromReport` was backward-compatible on the wire yet
+  forced edits to both the desktop and terminal apps to pass a value the server
+  would have supplied anyway.
+- `scripts/verify-api.mjs` sent no `title`, which has been required since
+  evidence titles landed, so the HMAC smoke test failed with a 400.
+
 ## [0.9.0] - 2026-09-04
 
 ### Added

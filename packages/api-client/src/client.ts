@@ -1,6 +1,6 @@
 import type {
   CheckConnectionResult,
-  CreateEvidenceInput,
+  CreateEvidenceInputArg,
   CreateEngagementInput,
   CreateTagInput,
   Evidence,
@@ -140,7 +140,7 @@ export class ReporterClient {
    */
   createEvidence(
     engagementSlug: string,
-    metadata: CreateEvidenceInput,
+    metadata: CreateEvidenceInputArg,
     file?: { filename: string; contentType: string; data: Buffer },
   ): Promise<Evidence> {
     const files: MultipartFile[] = file
