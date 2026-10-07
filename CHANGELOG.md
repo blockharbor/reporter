@@ -8,6 +8,8 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-07
+
 ### Added
 
 - **Full engagement export — one `.zip` that recreates an entire engagement on

@@ -1,6 +1,6 @@
 {
   "name": "reporter",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
   "description": "reporter — evidence collection and reporting toolkit for security engagements",
   "license": "MIT",
