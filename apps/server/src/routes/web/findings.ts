@@ -11,12 +11,21 @@ import { HttpError, requireAuth, requireEngagementRole } from '../../auth/guards
 import { REPORT_VISIBLE_EVIDENCE } from '../../helpers/report-visibility.js';
 import {
   evidenceInclude,
+  recommendationCountsByFinding,
   serializeFinding,
   serializeFindingEvidence,
 } from '../../services/serializers.js';
 
-// Every finding read (list + detail) carries its link counts: attached evidence and
-// linked goals. The Findings page filters/sorts on both, client-side.
+// Every finding read (list + detail) carries its link counts: attached evidence,
+// linked goals, and the strategic recommendations addressing it. The Findings page
+// filters/sorts on all three, client-side.
+//
+// Only the first two are relations countable here. `numRecommendations` comes from
+// the engagement's `strategicRecommendations` JSON column, so every route below
+// turns that column into a `findingUuid → count` map once, up front, with
+// `recommendationCountsByFinding` — one parse per request, never one per finding.
+// Each route already has the engagement row in hand (it resolves `:slug` to an id),
+// so the column costs no extra query.
 //
 // `numEvidenceInReport` needs a *report-filtered* count of that same evidence
 // relation, and Prisma's `_count` has no aliasing — `evidence` may appear in it
@@ -58,7 +67,8 @@ export async function findingRoutes(app: FastifyInstance): Promise<void> {
         include: findingInclude,
         orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
       });
-      return findings.map((f) => serializeFinding(f, slug));
+      const recCounts = recommendationCountsByFinding(eng.strategicRecommendations);
+      return findings.map((f) => serializeFinding(f, slug, recCounts.get(f.uuid) ?? 0));
     },
   );
 
@@ -95,7 +105,11 @@ export async function findingRoutes(app: FastifyInstance): Promise<void> {
         include: findingInclude,
       });
       reply.status(201);
-      return serializeFinding(finding, slug);
+      // In practice 0 — nothing can address a uuid that didn't exist a moment ago —
+      // but derived like everywhere else rather than hard-coded, so this stays right
+      // if creation ever accepts a caller-supplied uuid (the import path already does).
+      const recCounts = recommendationCountsByFinding(eng.strategicRecommendations);
+      return serializeFinding(finding, slug, recCounts.get(finding.uuid) ?? 0);
     },
   );
 
@@ -118,8 +132,9 @@ export async function findingRoutes(app: FastifyInstance): Promise<void> {
         include: { evidence: { include: evidenceInclude(req.authedUser!.id) } },
         orderBy: [{ inPath: 'desc' }, { position: 'asc' }, { evidenceId: 'asc' }],
       });
+      const recCounts = recommendationCountsByFinding(eng.strategicRecommendations);
       return {
-        ...serializeFinding(finding, slug),
+        ...serializeFinding(finding, slug, recCounts.get(finding.uuid) ?? 0),
         evidence: links.map((l) => serializeFindingEvidence(l, slug)),
       };
     },
@@ -207,7 +222,8 @@ export async function findingRoutes(app: FastifyInstance): Promise<void> {
         data,
         include: findingInclude,
       });
-      return serializeFinding(updated, slug);
+      const recCounts = recommendationCountsByFinding(eng.strategicRecommendations);
+      return serializeFinding(updated, slug, recCounts.get(updated.uuid) ?? 0);
     },
   );
 

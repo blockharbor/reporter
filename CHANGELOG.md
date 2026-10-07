@@ -107,6 +107,15 @@ timestamps` and `Show evidence operators` decide whether evidence capture times 
   URL so a filtered view is shareable, removable chips show what is active, and
   drag-to-reorder is disabled (with the reason in a tooltip) whenever a filter or
   a non-manual sort would make reordering write the wrong positions.
+- **A finding card counts the strategic recommendations addressing it.** Alongside
+  the evidence and linked-goals counts, a finding row now reads
+  `… · Evidence (4) · Goals (2) · Recommendations (1)`, where the recommendation
+  count is the engagement's strategic recommendations whose **Addresses** list names
+  that finding. Goals and recommendations appear only when non-zero, so a card with
+  neither stays as short as before, and the Findings list and the finding picker you
+  use when linking findings to a goal read identically. The Findings page gains a
+  matching has/has-no **strategic recommendation** filter (shareable in the URL,
+  with a removable chip) and a **Recommendations** sort key.
 
 ### Changed
 

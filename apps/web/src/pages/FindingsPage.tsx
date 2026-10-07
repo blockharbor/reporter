@@ -326,6 +326,7 @@ function SortableFindingRow({
           <p className="text-xs text-muted">
             {f.category ?? 'Uncategorized'} · Evidence ({f.numEvidence})
             {f.numGoals > 0 && ` · Goals (${f.numGoals})`}
+            {f.numRecommendations > 0 && ` · Recommendations (${f.numRecommendations})`}
           </p>
         </div>
         <div className="flex flex-shrink-0 items-center gap-2">

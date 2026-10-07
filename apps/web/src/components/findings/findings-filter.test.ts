@@ -36,6 +36,7 @@ function finding(partial: Partial<Finding> & { uuid: string }): Finding {
     numEvidence: 0,
     numEvidenceInReport: 0,
     numGoals: 0,
+    numRecommendations: 0,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...partial,
@@ -60,6 +61,7 @@ describe('filterFindings', () => {
       readyToReport: true,
       fixEffort: 'medium',
       numEvidence: 3,
+      numRecommendations: 2,
       iso21434Refs: ['iso-15-04'],
     }),
     finding({
@@ -115,6 +117,22 @@ describe('filterFindings', () => {
     expect(uuids(filterFindings(findings, filter({ hasEvidence: false })))).toEqual(['b']);
   });
 
+  it('filters on strategic-recommendation presence, and not at all when unset', () => {
+    expect(uuids(filterFindings(findings, filter({ hasRecommendations: true })))).toEqual(['a']);
+    expect(uuids(filterFindings(findings, filter({ hasRecommendations: false })))).toEqual([
+      'b',
+      'c',
+    ]);
+    expect(uuids(filterFindings(findings, filter({ hasRecommendations: undefined })))).toEqual([
+      'a',
+      'b',
+      'c',
+    ]);
+    // `false` is a real constraint, so it has to register as active.
+    expect(isFilterActive(filter({ hasRecommendations: false }))).toBe(true);
+    expect(isFilterActive(filter({ hasRecommendations: undefined }))).toBe(false);
+  });
+
   it('combines facets with AND', () => {
     const both = filter({ affectedTargets: ['Gateway ECU'], readyToReport: false });
     expect(uuids(filterFindings(findings, both))).toEqual(['c']);
@@ -137,6 +155,7 @@ describe('sortFindings', () => {
       severity: 'low',
       numEvidence: 5,
       numGoals: 1,
+      numRecommendations: 2,
     }),
     finding({
       uuid: 'b',
@@ -145,6 +164,7 @@ describe('sortFindings', () => {
       severity: null,
       numEvidence: 5,
       numGoals: 3,
+      numRecommendations: 2,
     }),
     finding({
       uuid: 'c',
@@ -192,6 +212,20 @@ describe('sortFindings', () => {
     expect(uuids(sortFindings(findings, { key: 'created', dir: 'desc' }))).toEqual(['c', 'a', 'b']);
     expect(uuids(sortFindings(findings, { key: 'updated', dir: 'desc' }))).toEqual(['c', 'a', 'b']);
     expect(uuids(sortFindings(findings, { key: 'goals', dir: 'desc' }))).toEqual(['b', 'a', 'c']);
+  });
+
+  it('sorts on strategic recommendations, breaking ties on position', () => {
+    // a and b both have 2 recommendations; a (position 0) always precedes b.
+    expect(uuids(sortFindings(findings, { key: 'recommendations', dir: 'desc' }))).toEqual([
+      'a',
+      'b',
+      'c',
+    ]);
+    expect(uuids(sortFindings(findings, { key: 'recommendations', dir: 'asc' }))).toEqual([
+      'c',
+      'a',
+      'b',
+    ]);
   });
 
   it('does not mutate the input array', () => {
@@ -246,6 +280,7 @@ describe('findings URL params', () => {
       readyToReport: false,
       fixEfforts: ['low'],
       hasEvidence: true,
+      hasRecommendations: true,
       affectedTargets: ['Gateway ECU'],
       iso21434: 'any',
       iso21434Refs: ['iso-15-04'],
@@ -269,6 +304,39 @@ describe('findings URL params', () => {
     expect(params.get('kind')).toBe('weakness');
     expect(params.get('sort')).toBe('severity');
     expect(params.get('dir')).toBe('desc');
+  });
+
+  it('round-trips the strategic-recommendation facet and sort key', () => {
+    const yes = writeFindingsParams(
+      new URLSearchParams(),
+      filter({ hasRecommendations: true }),
+      DEFAULT_SORT,
+    );
+    expect(yes.get('recs')).toBe('yes');
+    expect(parseFindingsParams(yes).filter.hasRecommendations).toBe(true);
+
+    const no = writeFindingsParams(
+      new URLSearchParams(),
+      filter({ hasRecommendations: false }),
+      DEFAULT_SORT,
+    );
+    expect(no.get('recs')).toBe('no');
+    expect(parseFindingsParams(no).filter.hasRecommendations).toBe(false);
+
+    const sorted = writeFindingsParams(new URLSearchParams(), EMPTY_FILTER, {
+      key: 'recommendations',
+      dir: 'asc',
+    });
+    expect(sorted.get('sort')).toBe('recommendations');
+    expect(parseFindingsParams(sorted).sort).toEqual({ key: 'recommendations', dir: 'asc' });
+    // Most-first is this key's natural direction when the URL names no direction.
+    expect(parseFindingsParams(new URLSearchParams('sort=recommendations')).sort).toEqual({
+      key: 'recommendations',
+      dir: 'desc',
+    });
+    expect(
+      parseFindingsParams(new URLSearchParams('recs=sometimes')).filter.hasRecommendations,
+    ).toBeUndefined();
   });
 
   it('leaves defaults out of the URL and keeps params it does not own', () => {

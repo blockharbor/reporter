@@ -58,6 +58,11 @@ export interface FindingsFilterState {
   fixEfforts: FixEffort[];
   /** `true` = has linked evidence, `false` = has none. */
   hasEvidence: boolean | undefined;
+  /**
+   * `true` = at least one of the engagement's strategic recommendations addresses
+   * this finding, `false` = none does.
+   */
+  hasRecommendations: boolean | undefined;
   affectedTargets: string[];
   /** Whether the finding carries any ISO/SAE 21434 mapping at all. */
   iso21434: MappingFilter | undefined;
@@ -77,6 +82,7 @@ export const EMPTY_FILTER: FindingsFilterState = {
   readyToReport: undefined,
   fixEfforts: [],
   hasEvidence: undefined,
+  hasRecommendations: undefined,
   affectedTargets: [],
   iso21434: undefined,
   iso21434Refs: [],
@@ -96,6 +102,7 @@ export function isFilterActive(f: FindingsFilterState): boolean {
     f.readyToReport !== undefined ||
     f.fixEfforts.length > 0 ||
     f.hasEvidence !== undefined ||
+    f.hasRecommendations !== undefined ||
     f.affectedTargets.length > 0 ||
     f.iso21434 !== undefined ||
     f.iso21434Refs.length > 0 ||
@@ -116,6 +123,7 @@ export const FINDING_SORT_KEYS = [
   'updated',
   'evidence',
   'goals',
+  'recommendations',
 ] as const;
 export type FindingSortKey = (typeof FINDING_SORT_KEYS)[number];
 
@@ -127,6 +135,7 @@ export const FINDING_SORT_LABELS: Record<FindingSortKey, string> = {
   updated: 'Last updated',
   evidence: 'Linked evidence',
   goals: 'Linked goals',
+  recommendations: 'Recommendations',
 };
 
 export interface FindingsSort {
@@ -147,6 +156,7 @@ export const DEFAULT_SORT_DIR: Record<FindingSortKey, SortDirection> = {
   updated: 'desc',
   evidence: 'desc',
   goals: 'desc',
+  recommendations: 'desc',
 };
 
 export const DEFAULT_SORT: FindingsSort = { key: 'manual', dir: 'asc' };
@@ -186,6 +196,8 @@ function compareOn(key: FindingSortKey, a: Finding, b: Finding): number {
       return a.numEvidence - b.numEvidence;
     case 'goals':
       return a.numGoals - b.numGoals;
+    case 'recommendations':
+      return a.numRecommendations - b.numRecommendations;
   }
 }
 
@@ -267,6 +279,13 @@ export function filterFindings(
     if (efforts.size > 0 && !efforts.has(f.fixEffort)) return false;
 
     if (filter.hasEvidence !== undefined && f.numEvidence > 0 !== filter.hasEvidence) {
+      return false;
+    }
+
+    if (
+      filter.hasRecommendations !== undefined &&
+      f.numRecommendations > 0 !== filter.hasRecommendations
+    ) {
       return false;
     }
 
@@ -354,6 +373,7 @@ const PARAM = {
   ready: 'ready',
   effort: 'effort',
   evidence: 'evidence',
+  recommendations: 'recs',
   target: 'target',
   iso21434: 'iso',
   iso21434Refs: 'iso-ref',
@@ -415,6 +435,7 @@ export function parseFindingsParams(params: URLSearchParams): {
       readyToReport: parseYesNo(params.get(PARAM.ready)),
       fixEfforts: pickEnum(params.get(PARAM.effort), FIX_EFFORTS),
       hasEvidence: parseYesNo(params.get(PARAM.evidence)),
+      hasRecommendations: parseYesNo(params.get(PARAM.recommendations)),
       affectedTargets: params.getAll(PARAM.target).filter((t) => t.trim() !== ''),
       iso21434: parseMapping(params.get(PARAM.iso21434)),
       iso21434Refs: splitList(params.get(PARAM.iso21434Refs)),
@@ -461,6 +482,9 @@ export function writeFindingsParams(
   setList(PARAM.effort, filter.fixEfforts);
   if (filter.hasEvidence !== undefined) {
     next.set(PARAM.evidence, filter.hasEvidence ? 'yes' : 'no');
+  }
+  if (filter.hasRecommendations !== undefined) {
+    next.set(PARAM.recommendations, filter.hasRecommendations ? 'yes' : 'no');
   }
   for (const t of filter.affectedTargets) next.append(PARAM.target, t);
   if (filter.iso21434) next.set(PARAM.iso21434, filter.iso21434);

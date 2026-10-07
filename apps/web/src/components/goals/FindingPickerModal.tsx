@@ -159,6 +159,8 @@ function FindingRow({
         <p className="truncate text-sm font-medium text-text">{f.title}</p>
         <p className="truncate text-xs text-muted">
           {f.category ?? 'Uncategorized'} · Evidence ({f.numEvidence})
+          {f.numGoals > 0 && ` · Goals (${f.numGoals})`}
+          {f.numRecommendations > 0 && ` · Recommendations (${f.numRecommendations})`}
         </p>
       </div>
       <div className="flex shrink-0 items-center gap-1.5">

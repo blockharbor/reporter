@@ -13,6 +13,7 @@ import type {
   User as DbUser,
 } from '@prisma/client';
 import {
+  recommendationItemSchema,
   reportConfigSchema,
   reportTemplateConfigSchema,
   type ApiKey,
@@ -272,7 +273,49 @@ type FindingWithRelations = DbFinding & {
   evidence: { evidenceId: number }[];
 };
 
-export function serializeFinding(f: FindingWithRelations, engagementSlug: string): Finding {
+/**
+ * `findingUuid → how many strategic recommendations address it`, built from an
+ * engagement's `strategicRecommendations` JSON column (pass the raw column value;
+ * null/undefined — an engagement that never had any — yields an empty map).
+ *
+ * The column is parsed through `recommendationItemSchema` rather than cast, so a
+ * shape the write path never produced can't make the counts lie; an unparseable
+ * column degrades to "no recommendations" instead of failing the request. One
+ * recommendation may address several findings, so the counts across findings
+ * legitimately sum to more than the number of recommendations, and a uuid naming a
+ * deleted finding matches nothing and is counted nowhere.
+ *
+ * Build this once per request and feed `serializeFinding` from it — never per
+ * finding, which would re-parse the column inside a loop.
+ */
+export function recommendationCountsByFinding(
+  strategicRecommendations: unknown,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  const parsed = recommendationItemSchema.array().safeParse(strategicRecommendations ?? []);
+  if (!parsed.success) return counts;
+  for (const rec of parsed.data) {
+    // Deduped per recommendation: the count is "how many recommendations address
+    // this finding", so a uuid repeated inside one `findingUuids` array (the editor
+    // can't produce it, the API shape permits it) must still count that
+    // recommendation once — matching what the finding page's own list shows.
+    for (const uuid of new Set(rec.findingUuids)) counts.set(uuid, (counts.get(uuid) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * `numRecommendations` arrives as its own argument rather than being derived here:
+ * the number lives on the engagement's JSON column, and taking the engagement row
+ * instead would both hand this serializer state it has no business reading and make
+ * it re-parse that column once per finding. A required positional parameter (not an
+ * optional extra) so a call site that hasn't got the count can't silently report 0.
+ */
+export function serializeFinding(
+  f: FindingWithRelations,
+  engagementSlug: string,
+  numRecommendations: number,
+): Finding {
   return {
     uuid: f.uuid,
     engagementSlug,
@@ -294,6 +337,7 @@ export function serializeFinding(f: FindingWithRelations, engagementSlug: string
     numEvidence: f._count?.evidence ?? 0,
     numEvidenceInReport: f.evidence.length,
     numGoals: f._count?.goals ?? 0,
+    numRecommendations,
     createdAt: f.createdAt.toISOString(),
     updatedAt: f.updatedAt.toISOString(),
   };

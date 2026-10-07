@@ -112,6 +112,16 @@ export function ActiveFindingFilterChips({
           onRemove={() => onChange({ ...filter, hasEvidence: undefined })}
         />
       )}
+      {filter.hasRecommendations !== undefined && (
+        <RemovableChip
+          label={
+            filter.hasRecommendations
+              ? 'Has strategic recommendation'
+              : 'No strategic recommendation'
+          }
+          onRemove={() => onChange({ ...filter, hasRecommendations: undefined })}
+        />
+      )}
       {filter.affectedTargets.map((t) => (
         <RemovableChip
           key={`target-${t}`}

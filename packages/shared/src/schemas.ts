@@ -660,6 +660,14 @@ export const findingSchema = z.object({
   /** How many engagement goals this finding is linked to (drives the Findings
    *  page's linked-goals filter/sort). */
   numGoals: z.number().int().nonnegative(),
+  /** How many of the engagement's strategic recommendations address this finding —
+   *  the ones whose `findingUuids` include this `uuid`. Not a relation: the source
+   *  is the engagement's `strategicRecommendations` JSON column, so the server
+   *  derives this per request rather than counting rows. A recommendation may
+   *  address several findings, so these counts legitimately sum to more than the
+   *  number of recommendations; a dangling uuid (the finding was deleted) simply
+   *  never matches and is counted nowhere. */
+  numRecommendations: z.number().int().nonnegative(),
   createdAt: isoDateSchema,
   /** Last modification time; equals `createdAt` until the finding is edited. */
   updatedAt: isoDateSchema,

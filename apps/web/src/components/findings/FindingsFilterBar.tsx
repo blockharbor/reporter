@@ -185,6 +185,14 @@ export function FindingsFilterBar({
           yesLabel="Has evidence"
           noLabel="No evidence"
         />
+        <TriStateFilter
+          value={filter.hasRecommendations}
+          onChange={(hasRecommendations) => onFilterChange({ ...filter, hasRecommendations })}
+          label="Filter by strategic recommendations"
+          anyLabel="Any recommendations"
+          yesLabel="Has recommendations"
+          noLabel="No recommendations"
+        />
 
         <div className="ml-auto">
           <FindingsSortControls sort={sort} onChange={onSortChange} />

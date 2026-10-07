@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import type { RecommendationItem } from '@reporter/shared';
 import { WEB_HEADERS, buildTestApp, loginCookie, seedUsers, truncateAll } from './helpers.js';
 
 let app: FastifyInstance;
@@ -708,5 +709,133 @@ describe('findings import', () => {
     const { cookie } = await setup();
     const res = await post('/web/engagements/op1/findings/import', cookie, { nope: true });
     expect(res.statusCode).toBe(400);
+  });
+});
+
+describe('finding strategic-recommendation counts', () => {
+  // `strategicRecommendations` is a JSON column on the engagement, not a relation,
+  // so these write it directly — including shapes the editor would reject (a uuid
+  // for a finding that no longer exists), which is exactly what the read must survive.
+  const setRecommendations = (recs: RecommendationItem[]) =>
+    app.db.engagement.update({ where: { slug: 'op1' }, data: { strategicRecommendations: recs } });
+
+  const rec = (title: string, findingUuids: string[]): RecommendationItem => ({
+    title,
+    description: '',
+    findingUuids,
+  });
+
+  const list = (cookie: string) =>
+    app
+      .inject({ method: 'GET', url: '/web/engagements/op1/findings', headers: { cookie } })
+      .then((r) => r.json() as { uuid: string; numRecommendations: number }[]);
+
+  const detail = (cookie: string, uuid: string) =>
+    app
+      .inject({ method: 'GET', url: `/web/engagements/op1/findings/${uuid}`, headers: { cookie } })
+      .then((r) => r.json() as { numRecommendations: number });
+
+  const countFor = (findings: { uuid: string; numRecommendations: number }[], uuid: string) =>
+    findings.find((f) => f.uuid === uuid)!.numRecommendations;
+
+  it('reports 0 for every finding when the engagement has no recommendations', async () => {
+    const { cookie } = await setup();
+    const a = await createFinding(cookie, 'A');
+    const b = await createFinding(cookie, 'B');
+    // The column defaults to `[]` and nothing has written it — no throw, just zeros.
+    const findings = await list(cookie);
+    expect(findings.map((f) => f.numRecommendations)).toEqual([0, 0]);
+    expect((await detail(cookie, a.uuid)).numRecommendations).toBe(0);
+    expect((await detail(cookie, b.uuid)).numRecommendations).toBe(0);
+  });
+
+  it('counts only the recommendations whose findingUuids include the finding', async () => {
+    const { cookie } = await setup();
+    const a = await createFinding(cookie, 'A');
+    const b = await createFinding(cookie, 'B');
+    await setRecommendations([
+      rec('Harden the gateway', [a.uuid]),
+      rec('Rotate the keys', [a.uuid]),
+      rec('Unrelated housekeeping', []),
+    ]);
+
+    const findings = await list(cookie);
+    expect(countFor(findings, a.uuid)).toBe(2);
+    expect(countFor(findings, b.uuid)).toBe(0);
+  });
+
+  it('counts a recommendation that addresses two findings for both of them', async () => {
+    const { cookie } = await setup();
+    const a = await createFinding(cookie, 'A');
+    const b = await createFinding(cookie, 'B');
+    await setRecommendations([rec('Segment the network', [a.uuid, b.uuid])]);
+
+    const findings = await list(cookie);
+    // One recommendation, two findings crediting it: the counts sum to more than
+    // the number of recommendations, which is correct.
+    expect(countFor(findings, a.uuid)).toBe(1);
+    expect(countFor(findings, b.uuid)).toBe(1);
+  });
+
+  it('ignores a findingUuids entry pointing at a deleted or unknown finding', async () => {
+    const { cookie } = await setup();
+    const a = await createFinding(cookie, 'A');
+    const doomed = await createFinding(cookie, 'Doomed');
+    await setRecommendations([
+      rec('Addresses a survivor and a ghost', [a.uuid, doomed.uuid]),
+      rec('Addresses only a stranger', ['00000000-0000-0000-0000-000000000000']),
+    ]);
+    await app.inject({
+      method: 'DELETE',
+      url: `/web/engagements/op1/findings/${doomed.uuid}`,
+      headers: { ...WEB_HEADERS, cookie },
+    });
+
+    const findings = await list(cookie);
+    expect(findings).toHaveLength(1);
+    // The dangling uuids are counted nowhere — they don't inflate the survivor.
+    expect(countFor(findings, a.uuid)).toBe(1);
+  });
+
+  it('counts a recommendation once even if it names the same finding twice', async () => {
+    const { cookie } = await setup();
+    const a = await createFinding(cookie, 'A');
+    await setRecommendations([rec('Says it twice', [a.uuid, a.uuid])]);
+
+    // The count is "how many recommendations address this finding", so one
+    // recommendation is one, however many times its findingUuids repeat the uuid.
+    expect(countFor(await list(cookie), a.uuid)).toBe(1);
+  });
+
+  it('degrades to zeros rather than failing when the column holds an unparseable shape', async () => {
+    const { cookie } = await setup();
+    const a = await createFinding(cookie, 'A');
+    // Not an array of recommendations at all — the read must survive it.
+    await app.db.engagement.update({
+      where: { slug: 'op1' },
+      data: { strategicRecommendations: { nope: true } },
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/web/engagements/op1/findings',
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(countFor(res.json(), a.uuid)).toBe(0);
+  });
+
+  it('serves the count on the list and the detail response alike', async () => {
+    const { cookie } = await setup();
+    const a = await createFinding(cookie, 'A');
+    await setRecommendations([rec('One', [a.uuid]), rec('Two', [a.uuid]), rec('Three', [a.uuid])]);
+
+    expect(countFor(await list(cookie), a.uuid)).toBe(3);
+    expect((await detail(cookie, a.uuid)).numRecommendations).toBe(3);
+    // And on the write responses, so a client never has to refetch to catch up.
+    const updated = (await update(cookie, a.uuid, { title: 'A renamed' })).json();
+    expect(updated.numRecommendations).toBe(3);
+    const created = await createFinding(cookie, 'Fresh');
+    expect(created.numRecommendations).toBe(0);
   });
 });
