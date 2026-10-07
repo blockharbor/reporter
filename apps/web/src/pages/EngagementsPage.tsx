@@ -37,6 +37,9 @@ import {
   useImportProposal,
   useToggleFavorite,
 } from '../api/hooks.js';
+import { useAuth } from '../auth.js';
+import { SITE_ADMIN_ONLY_TITLE } from '../lib/permissions.js';
+import { ImportEngagementModal } from '../components/engagement/ImportEngagementModal.js';
 import { ProgressBar } from '../components/goals/ProgressBar.js';
 
 const STATUS_TONE = { active: 'success', complete: 'info', archived: 'neutral' } as const;
@@ -149,7 +152,13 @@ function usePersistedView(): [EngagementsView, (v: EngagementsView) => void] {
 
 export function EngagementsPage() {
   const { data: engagements, isLoading, isError, refetch } = useEngagements();
+  const { user } = useAuth();
   const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
+  // Importing a whole engagement is site-admin only (it attributes rows to other
+  // accounts and writes an unbounded number of them), so the button stays visible
+  // but disabled for everyone else, with the reason in its title.
+  const canImport = Boolean(user?.admin);
   const [view, setView] = usePersistedView();
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<EngagementStatus | 'all'>('active');
@@ -185,6 +194,14 @@ export function EngagementsPage() {
         </div>
         <div className="flex items-center gap-2">
           {hasEngagements && <ViewToggle view={view} onChange={setView} />}
+          <Button
+            variant="secondary"
+            onClick={() => setImporting(true)}
+            disabled={!canImport}
+            title={canImport ? undefined : SITE_ADMIN_ONLY_TITLE}
+          >
+            Import engagement
+          </Button>
           <Button onClick={() => setCreating(true)}>New engagement</Button>
         </div>
       </div>
@@ -224,8 +241,20 @@ export function EngagementsPage() {
       ) : !engagements || engagements.length === 0 ? (
         <EmptyState
           title="No engagements yet"
-          description="Create your first engagement to start collecting evidence."
-          action={<Button onClick={() => setCreating(true)}>New engagement</Button>}
+          description="Create your first engagement to start collecting evidence, or restore one from an export archive."
+          action={
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button onClick={() => setCreating(true)}>New engagement</Button>
+              <Button
+                variant="secondary"
+                onClick={() => setImporting(true)}
+                disabled={!canImport}
+                title={canImport ? undefined : SITE_ADMIN_ONLY_TITLE}
+              >
+                Import engagement
+              </Button>
+            </div>
+          }
         />
       ) : filtered.length === 0 && filtersActive ? (
         <EmptyState
@@ -248,6 +277,7 @@ export function EngagementsPage() {
       )}
 
       <CreateEngagementModal open={creating} onClose={() => setCreating(false)} />
+      <ImportEngagementModal open={importing} onClose={() => setImporting(false)} />
     </div>
   );
 }

@@ -10,11 +10,12 @@
  * field at all (pasting works, typing doesn't). Use `slugifyDraft` in `onChange`
  * and `slugify` on blur and again before submit.
  */
+import { SLUG_MAX_LENGTH } from '@reporter/shared';
 
 /**
  * Lenient slugifier for a field the user is still typing into. Lowercases,
  * NFKD-normalizes, collapses every run of non-slug characters to a single
- * hyphen, drops leading hyphens and caps the result at 64 characters.
+ * hyphen, drops leading hyphens and caps the result at `SLUG_MAX_LENGTH`.
  *
  * Leading and trailing hyphens are treated differently on purpose: a leading
  * hyphen can never become valid by typing more, so removing it costs the user
@@ -29,7 +30,7 @@ export function slugifyDraft(input: string): string {
     .normalize('NFKD')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+/, '')
-    .slice(0, 64);
+    .slice(0, SLUG_MAX_LENGTH);
 }
 
 /**
@@ -37,7 +38,7 @@ export function slugifyDraft(input: string): string {
  * always satisfies `slugSchema`. Mirrors the server helper
  * `apps/server/src/helpers/slug.ts` — keep the two in sync.
  *
- * The trailing strip must run *after* the 64-character cap, not before:
+ * The trailing strip must run *after* the length cap, not before:
  * truncating a longer input can land a hyphen in the last position, which
  * `slugSchema` rejects.
  */

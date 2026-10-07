@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { HttpError } from '../../auth/guards.js';
 import { authRoutes } from './auth.js';
 import { engagementRoutes } from './engagements.js';
+import { engagementTransferRoutes } from './engagement-transfer.js';
 import { evidenceRoutes } from './evidence.js';
 import { findingRoutes } from './findings.js';
 import { goalRoutes } from './goals.js';
@@ -27,6 +28,7 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
 
   await app.register(authRoutes);
   await app.register(engagementRoutes);
+  await app.register(engagementTransferRoutes);
   await app.register(evidenceRoutes);
   await app.register(findingRoutes);
   await app.register(goalRoutes);

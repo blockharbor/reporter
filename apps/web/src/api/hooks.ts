@@ -25,6 +25,7 @@ import type {
   ImportRequest,
   ImportResult,
   Engagement,
+  EngagementImportResult,
   LinkedGoal,
   ReportSettings,
   ReportTemplate,
@@ -148,6 +149,51 @@ export function useDeleteEngagement(slug: string) {
       // The engagement (and its cached detail/children) is gone — drop it from
       // the lists and forget any per-engagement queries still in the cache.
       qc.removeQueries({ queryKey: engKey(slug) });
+      qc.invalidateQueries({ queryKey: ['engagements'] });
+      qc.invalidateQueries({ queryKey: ['admin-engagements'] });
+    },
+  });
+}
+
+// --- Full engagement export / import ---
+//
+// The export side needs no hook: `GET /web/engagements/:slug/export.zip` is a plain
+// authenticated download, so pages call `downloadFile` from `lib/download.ts` — the
+// same idiom the Reports page uses for generated reports.
+
+/** The archive plus the two optional overrides the import route accepts. */
+export interface ImportEngagementArgs {
+  /** The `.zip` written by the engagement export. */
+  file: File;
+  /** Name for the new engagement; omitted, the file's name is kept. */
+  name?: string;
+  /** Slug for the new engagement; omitted, the file's slug is uniquified. */
+  slug?: string;
+}
+
+/**
+ * Restore an engagement from an export archive.
+ *
+ * Always creates a NEW engagement: the route has no `:slug`, so there is no
+ * existing engagement a request could address. Site-admin only, matching the
+ * server's guard. Slow for a real archive — every blob uploads, then every row is
+ * written in one transaction — so callers must show a pending state and block a
+ * second submit.
+ */
+export function useImportEngagement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: ImportEngagementArgs) => {
+      const form = new FormData();
+      form.append('file', args.file, args.file.name);
+      // Only send an override the user actually filled in: a blank field would
+      // mean "not supplied" to the route anyway, and omitting it says so plainly.
+      if (args.name) form.append('name', args.name);
+      if (args.slug) form.append('slug', args.slug);
+      return api.postForm<EngagementImportResult>('/web/engagements/import', form);
+    },
+    // A new engagement appears in both lists; nothing existing can have changed.
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['engagements'] });
       qc.invalidateQueries({ queryKey: ['admin-engagements'] });
     },

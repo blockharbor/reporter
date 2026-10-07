@@ -6,6 +6,12 @@ import { useEngagement } from '../api/hooks.js';
 export const READ_ONLY_TITLE = 'You have read-only access to this engagement';
 /** `title` for controls that need the engagement admin role. */
 export const ADMIN_ONLY_TITLE = 'Requires engagement admin';
+/**
+ * `title` for controls that need a site admin — a stronger bar than
+ * {@link ADMIN_ONLY_TITLE}, which an engagement's own admin satisfies. Used by
+ * actions with no engagement to scope a role to, such as importing an engagement.
+ */
+export const SITE_ADMIN_ONLY_TITLE = 'Requires a site admin';
 
 /**
  * Does the user hold `atLeast` on the engagement? Site admins bypass every

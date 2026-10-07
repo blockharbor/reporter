@@ -21,6 +21,7 @@ import {
   useToast,
 } from '@reporter/ui';
 import {
+  DELETED_USER_LABEL,
   type EngagementMember,
   type EngagementRole,
   type EngagementStatus,
@@ -28,10 +29,12 @@ import {
 import { api } from '../api/client.js';
 import { useAuth } from '../auth.js';
 import { useDeleteEngagement, useEngagement, useUpdateEngagement } from '../api/hooks.js';
+import { downloadFile } from '../lib/download.js';
 import { fromDateInput, toDateInputValue } from '../lib/format.js';
 import { ADMIN_ONLY_TITLE, canAdmin, canWrite } from '../lib/permissions.js';
 import { useAutosave } from '../hooks/useAutosave.js';
 import { SaveStatusIndicator } from '../components/SaveStatusIndicator.js';
+import { EXCLUDED_FROM_REPORT_LABEL } from '../components/evidence/ExcludedFromReportBadge.js';
 import { TagManager } from '../components/engagement/TagManager.js';
 import { CategoryManager } from '../components/engagement/CategoryManager.js';
 
@@ -64,6 +67,7 @@ export function EngagementSettingsPage() {
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
+  const [exporting, setExporting] = useState(false);
   // Details, membership, and deletion need the engagement admin role; tags and
   // categories need write. Site admins pass both. The server enforces this too.
   const isEngAdmin = canAdmin(user, eng);
@@ -110,8 +114,7 @@ export function EngagementSettingsPage() {
   // and never saves.
   const nameInvalid = form.name.trim().length === 0;
   const startInvalid = form.startedAt.trim().length === 0;
-  const formValid = (v: SettingsForm) =>
-    v.name.trim().length > 0 && v.startedAt.trim().length > 0;
+  const formValid = (v: SettingsForm) => v.name.trim().length > 0 && v.startedAt.trim().length > 0;
 
   const { status: saveStatus, flush } = useAutosave<SettingsForm>({
     value: form,
@@ -184,6 +187,24 @@ export function EngagementSettingsPage() {
       danger: true,
     });
     if (ok) removeMember.mutate(userSlugToRemove);
+  }
+
+  /**
+   * Download the whole engagement as a backup archive. A plain authenticated
+   * download (the server names the file), so it follows the same `downloadFile`
+   * idiom as the Reports tab rather than going through a mutation hook. Buffered in
+   * the browser before it is saved, so a very large engagement takes a while with
+   * no byte-level progress to report — hence the pending button.
+   */
+  async function downloadExport() {
+    setExporting(true);
+    try {
+      await downloadFile(`/web/engagements/${slug}/export.zip`, `${slug}-engagement.zip`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Export failed');
+    } finally {
+      setExporting(false);
+    }
   }
 
   function openDelete() {
@@ -393,6 +414,61 @@ export function EngagementSettingsPage() {
       <Card className="space-y-4 p-4">
         <h3 className="text-sm font-semibold text-text">Finding categories</h3>
         <CategoryManager slug={slug} readOnly={!isEngWriter} />
+      </Card>
+
+      {/* Whole-engagement backup. Distinct from the Reports tab's exports: those
+          are deliverables (and its findings JSON moves findings between
+          engagements), while this one file recreates the engagement itself. Gated
+          on engagement admin, like the server route — a read member can already
+          fetch each piece one at a time, so what this adds is whole-engagement
+          scope in a single file. */}
+      <Card className="space-y-4 p-4 lg:col-span-2">
+        <h3 className="text-sm font-semibold text-text">Export engagement</h3>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="max-w-2xl space-y-2 text-sm text-muted">
+            <p>
+              Downloads this entire engagement as a single <span className="font-mono">.zip</span>,
+              for a backup or to recreate it on another reporter server with{' '}
+              <strong className="font-medium text-text">Import engagement</strong> on the
+              Engagements page. That import always creates a new engagement — it never overwrites
+              one — and needs a site admin on the destination server.
+            </p>
+            <p>
+              The file carries the engagement&rsquo;s details and all of its report content, its
+              Targets, Activities and Goals, its Tags, every piece of Evidence{' '}
+              <strong className="font-medium text-text">including the file content</strong> —
+              screenshots, terminal recordings, thumbnails — comments on evidence, every Finding
+              with its categories and evidence links, the saved queries, and the report history
+              together with the exact files that were generated.
+            </p>
+            <p>
+              A backup is not a deliverable, so Evidence marked &ldquo;
+              {EXCLUDED_FROM_REPORT_LABEL}&rdquo; is included as well, still flagged: an import
+              restores the exclusion along with the evidence.
+            </p>
+            <p>
+              Left behind: members (whoever imports the file becomes the new engagement&rsquo;s
+              admin), favorites, API keys and sessions, and this server&rsquo;s site-wide report
+              branding and report templates. Evidence and comment authors travel as email addresses
+              and are matched to accounts on the destination server; no match there shows as &ldquo;
+              {DELETED_USER_LABEL}&rdquo;, and an import never creates an account.
+            </p>
+            <p>
+              Expect a large file — it holds every stored file in the engagement — and treat it like
+              the evidence itself.
+            </p>
+          </div>
+          <Button
+            variant="secondary"
+            onClick={downloadExport}
+            loading={exporting}
+            disabled={!isEngAdmin}
+            title={adminOnlyTitle}
+            className="shrink-0"
+          >
+            Export engagement
+          </Button>
+        </div>
       </Card>
 
       {isEngAdmin && (

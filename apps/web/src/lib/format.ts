@@ -79,3 +79,24 @@ export function formatRelative(iso: string): string {
   }
   return rtf.format(-secs, 'second');
 }
+
+/**
+ * Humanize a byte count — "840 B", "2.4 MB", "1.1 GB". Null renders as the empty
+ * string so a size that was never recorded (report history from before artifacts
+ * were stored) simply shows nothing rather than "0 B".
+ *
+ * Binary units (1024) with a decimal label, matching what desktop file managers
+ * show, since every caller is labelling a file the operator will save or has saved.
+ */
+export function formatBytes(bytes: number | null): string {
+  if (bytes == null) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}

@@ -67,6 +67,7 @@ import {
   useUpdateEngagement,
 } from '../api/hooks.js';
 import { useEngagementPermissions } from '../lib/permissions.js';
+import { formatBytes } from '../lib/format.js';
 import { useAutosave } from '../hooks/useAutosave.js';
 import { computeFindingWarnings, computeReadiness } from '../lib/report-readiness.js';
 import { SaveStatusIndicator } from '../components/SaveStatusIndicator.js';
@@ -93,20 +94,6 @@ const SECTION_TABS: { key: Section; label: string }[] = [
   { key: 'generate', label: 'Generate & History' },
   { key: 'attestation', label: 'Attestation' },
 ];
-
-/** Humanize a byte count for the report-history size hint (null → ''). */
-function fmtBytes(bytes: number | null): string {
-  if (bytes == null) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ['KB', 'MB', 'GB'];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
-}
 
 /** Stable id for a custom section not yet given a real id. */
 function makeCustomId(): string {
@@ -928,7 +915,7 @@ export function ReportsPage() {
                   {hasHistory ? (
                     <ul className="space-y-2">
                       {(showAllHistory ? history : history.slice(0, 8)).map((r) => {
-                        const sizeLabel = fmtBytes(r.sizeBytes);
+                        const sizeLabel = formatBytes(r.sizeBytes);
                         const downloading = downloadingUuid === r.uuid;
                         return (
                           <li

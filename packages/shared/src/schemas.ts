@@ -24,11 +24,18 @@ import {
 } from './enums.js';
 import { cvssVectorSchema } from './cvss.js';
 
+/**
+ * Longest slug any route accepts. Exported because the server derives slugs
+ * (`uniqueSlug`, which appends a `-2`, `-3`, … suffix) and has to keep the result
+ * inside the same bound it will later be validated against.
+ */
+export const SLUG_MAX_LENGTH = 64;
+
 /** A URL-safe slug: lowercase alphanumerics and hyphens. */
 export const slugSchema = z
   .string()
   .min(1)
-  .max(64)
+  .max(SLUG_MAX_LENGTH)
   .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'must be lowercase alphanumerics separated by hyphens');
 
 export const uuidSchema = z.string().uuid();
@@ -1201,3 +1208,511 @@ export const findingsImportResult = z.object({
   evidenceSkipped: z.number().int().nonnegative(),
 });
 export type FindingsImportResult = z.infer<typeof findingsImportResult>;
+
+// ---------------------------------------------------------------------------
+// Full engagement export (the engagement `.zip` container)
+//
+// A *backup* of one whole engagement: everything the engagement owns, enough to
+// recreate it on another reporter server. Deliberately separate from the findings
+// export above (`findingsExportSchema`), which is a deliverable-shaped,
+// findings-scoped file for moving findings between engagements — the two shapes
+// and the two version constants are independent on purpose, so neither use case
+// is held back by the other's compatibility story.
+//
+// The container is a ZIP rather than one JSON document because a real engagement
+// carries screenshots and terminal recordings:
+//
+//   manifest.json      `engagementExportManifestSchema` — format, version, counts
+//   engagement.json    `engagementExportSchema` — every record
+//   blobs/<sha256>     evidence / thumbnail / report-artifact bytes, named by the
+//                      lowercase hex sha-256 of their content
+//
+// Entry order is part of the format: the two JSON entries come first so a reader
+// can validate the version and the records before inflating a single blob.
+//
+// How the pieces reference each other:
+//  - the goal tree uses *file-local* keys (`t0`, `t0.a1`, `t0.a1.g2`). Those three
+//    models (EngagementTarget / TargetActivity / ActivityGoal) have no uuid
+//    column, and because an import always creates a NEW engagement, keys that are
+//    unique within one file are enough — no schema migration is needed to make the
+//    tree portable.
+//  - evidence, findings, comments and generated reports carry their own `uuid`.
+//  - tags are referenced by name (unique within an engagement).
+//  - blobs are referenced by content hash, i.e. by the name of a `blobs/` entry.
+//  - users are referenced by email only, and an import must never create one: an
+//    unmatched email leaves the (nullable, `SET NULL`) author column null, which
+//    already renders as the shared "Deleted user" label.
+//
+// Carries report-excluded evidence. A full engagement export is a backup, not a
+// deliverable, so evidence flagged `excludeFromReport` travels with the flag
+// intact and needs no `includeExcludedEvidence` opt-in — that opt-in exists on the
+// findings export precisely because *that* file is deliverable-shaped and its
+// default view is report-filtered.
+// ---------------------------------------------------------------------------
+
+/** Bump when the engagement-export shape changes incompatibly; import gates on it. */
+export const ENGAGEMENT_EXPORT_VERSION = 1;
+
+/** Marker in `manifest.json`, so a stray ZIP is rejected before anything is read. */
+export const ENGAGEMENT_EXPORT_FORMAT = 'reporter-engagement-export';
+
+/** ZIP entry holding the manifest — written first, readable without inflating the rest. */
+export const ENGAGEMENT_EXPORT_MANIFEST_ENTRY = 'manifest.json';
+/** ZIP entry holding every record (`engagementExportSchema`). */
+export const ENGAGEMENT_EXPORT_DATA_ENTRY = 'engagement.json';
+/** Prefix of the blob entries; the rest of the name is the content hash. */
+export const ENGAGEMENT_EXPORT_BLOB_PREFIX = 'blobs/';
+
+// Per-collection caps. They bound the work a crafted file can ask an import to do,
+// and are set far above any real engagement; the writer validates its own output
+// against them so an engagement that outgrows one fails loudly at export time
+// rather than producing a file that only fails on the way back in. The findings
+// caps are reused rather than restated.
+export const MAX_ENGAGEMENT_EXPORT_TARGETS = 500;
+export const MAX_ENGAGEMENT_EXPORT_ACTIVITIES_PER_TARGET = 500;
+export const MAX_ENGAGEMENT_EXPORT_GOALS_PER_ACTIVITY = 1000;
+/** Cap on each goal's evidence and finding link lists (matches `linkGoalEvidenceInput`). */
+export const MAX_ENGAGEMENT_EXPORT_GOAL_LINKS = 500;
+export const MAX_ENGAGEMENT_EXPORT_TAGS = 1000;
+export const MAX_ENGAGEMENT_EXPORT_EVIDENCE = 50_000;
+export const MAX_ENGAGEMENT_EXPORT_COMMENTS = 50_000;
+export const MAX_ENGAGEMENT_EXPORT_CATEGORIES = 1000;
+export const MAX_ENGAGEMENT_EXPORT_SAVED_QUERIES = 500;
+export const MAX_ENGAGEMENT_EXPORT_GENERATED_REPORTS = 1000;
+
+/**
+ * A `blobs/` entry name minus its prefix: the lowercase hex sha-256 of the entry's
+ * bytes. Content-addressed on purpose — identical blobs (the same screenshot
+ * captured twice) collapse to one entry, and an importer can verify what it
+ * inflated instead of trusting a length or a hash recorded elsewhere in the file.
+ */
+export const contentHashSchema = z
+  .string()
+  .regex(/^[0-9a-f]{64}$/, 'must be a lowercase hex sha-256 digest');
+
+/**
+ * A file-local key for a row that has no uuid: dot-separated segments, as in
+ * `t0.a1.g2`. Only ever meaningful inside one export file.
+ */
+export const exportKeySchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*$/, 'must be dot-separated alphanumeric segments');
+
+/** A user reference inside an export: an email, matched against local accounts. */
+const exportedUserEmailSchema = z.string().max(320).email().nullable().default(null);
+
+/** One of the engagement's tags. Referenced from elsewhere in the file by `name`. */
+export const exportedTagSchema = z.object({
+  name: z.string().min(1).max(64),
+  colorName: z.string(),
+});
+export type ExportedTag = z.infer<typeof exportedTagSchema>;
+
+/**
+ * A goal (ActivityGoal) with its links. `key` is file-local (see
+ * {@link exportKeySchema}); the links name evidence and findings by uuid.
+ */
+export const exportedGoalSchema = z.object({
+  key: exportKeySchema,
+  title: z.string().min(1).max(500),
+  status: goalStatusSchema,
+  isRetest: z.boolean().default(false),
+  notes: z.string().default(''),
+  position: z.number().int().nonnegative(),
+  /** Evidence linked to this goal (GoalEvidence), by evidence uuid. */
+  evidenceUuids: z.array(uuidSchema).max(MAX_ENGAGEMENT_EXPORT_GOAL_LINKS).default([]),
+  /** Findings linked to this goal (GoalFinding), by finding uuid. */
+  findingUuids: z.array(uuidSchema).max(MAX_ENGAGEMENT_EXPORT_GOAL_LINKS).default([]),
+});
+export type ExportedGoal = z.infer<typeof exportedGoalSchema>;
+
+/**
+ * A testing activity (TargetActivity) and its goals. Its correlation tag travels
+ * by name, not id, and is null when the activity had none (the column is
+ * `SET NULL`, so a deleted tag already leaves it empty).
+ */
+export const exportedActivitySchema = z.object({
+  key: exportKeySchema,
+  name: z.string().min(1).max(255),
+  category: z.string().default(''),
+  tagName: z.string().max(64).nullable().default(null),
+  position: z.number().int().nonnegative(),
+  goals: z.array(exportedGoalSchema).max(MAX_ENGAGEMENT_EXPORT_GOALS_PER_ACTIVITY).default([]),
+});
+export type ExportedActivity = z.infer<typeof exportedActivitySchema>;
+
+/** A scope target (EngagementTarget) — the top of the goal tree — and its activities. */
+export const exportedTargetSchema = z.object({
+  key: exportKeySchema,
+  name: z.string().min(1).max(255),
+  description: z.string().default(''),
+  position: z.number().int().nonnegative(),
+  activities: z
+    .array(exportedActivitySchema)
+    .max(MAX_ENGAGEMENT_EXPORT_ACTIVITIES_PER_TARGET)
+    .default([]),
+});
+export type ExportedTarget = z.infer<typeof exportedTargetSchema>;
+
+/**
+ * One piece of evidence, with its blobs referenced by content hash.
+ *
+ * `Evidence.sha256` and `Evidence.sizeBytes` are deliberately absent: the full
+ * blob's hash *is* that sha256, and its size is the length of the entry that was
+ * actually inflated, so an import derives both from the bytes in front of it
+ * rather than trusting numbers recorded next to them.
+ */
+export const exportedEngagementEvidenceSchema = z.object({
+  uuid: uuidSchema,
+  title: z.string().default(''),
+  description: z.string().default(''),
+  contentType: evidenceTypeSchema,
+  /**
+   * Unbounded on purpose: `createEvidenceInput.contentSubtype` is free text, so a
+   * stored value can be any length and a bound here would make a legal engagement
+   * impossible to back up. No field in this format may be stricter than the write
+   * path that produced the row. (`originalFilename` below *is* bounded, because the
+   * evidence service truncates it to 255 on the way in.)
+   */
+  contentSubtype: z.string().nullable().default(null),
+  originalFilename: z.string().max(255).nullable().default(null),
+  occurredAt: isoDateSchema,
+  createdAt: isoDateSchema,
+  updatedAt: isoDateSchema,
+  /** `blobs/<hash>` holding the full content; null when there is none to carry. */
+  fullBlobHash: contentHashSchema.nullable().default(null),
+  /** `blobs/<hash>` holding the generated thumbnail (images only); null otherwise. */
+  thumbBlobHash: contentHashSchema.nullable().default(null),
+  /** The evidence's tags (EvidenceTag), by tag name. */
+  tagNames: z.array(z.string().max(64)).max(MAX_ENGAGEMENT_EXPORT_TAGS).default([]),
+  /** Parent capture when this is linked evidence (one level deep), else null. */
+  parentEvidenceUuid: uuidSchema.nullable().default(null),
+  /** Who captured it, by email. Unmatched on import → left null ("Deleted user"). */
+  operatorEmail: exportedUserEmailSchema,
+  /** Who last edited it, by email; null when never edited. */
+  lastEditedByEmail: exportedUserEmailSchema,
+  /** Carried with the evidence, so an import restores the exclusion rather than
+   *  re-admitting the item to every report output. */
+  excludeFromReport: z.boolean().default(false),
+});
+export type ExportedEngagementEvidence = z.infer<typeof exportedEngagementEvidenceSchema>;
+
+/**
+ * A plain-text discussion comment (EvidenceComment) — internal notes, never part
+ * of a report, but part of a backup. Flat rather than nested under the evidence so
+ * the evidence block stays one row per capture.
+ */
+export const exportedEvidenceCommentSchema = z.object({
+  uuid: uuidSchema,
+  /** The evidence this comment hangs off. */
+  evidenceUuid: uuidSchema,
+  authorEmail: exportedUserEmailSchema,
+  body: z.string(),
+  createdAt: isoDateSchema,
+  updatedAt: isoDateSchema,
+});
+export type ExportedEvidenceComment = z.infer<typeof exportedEvidenceCommentSchema>;
+
+/**
+ * A finding category (FindingCategory). Carried as its own list, not merely as the
+ * name on each finding, so an unused category — or one that was soft-deleted —
+ * survives the round trip.
+ */
+export const exportedFindingCategorySchema = z.object({
+  /**
+   * Unbounded for the same reason as `contentSubtype` above: a finding's `category`
+   * is free text on create/update and is upserted into `FindingCategory` verbatim,
+   * so the stored name has no length limit to inherit.
+   */
+  category: z.string().min(1),
+  /** Soft-delete marker; a deleted category stays hidden after an import. */
+  deletedAt: isoDateSchema.nullable().default(null),
+});
+export type ExportedFindingCategory = z.infer<typeof exportedFindingCategorySchema>;
+
+/**
+ * One evidence↔finding link (EvidenceFinding): which bucket it sits in
+ * (`inPath` — Attack Path vs Attached Evidence), where in that bucket, and the
+ * Attack Path step caption.
+ */
+export const exportedEvidenceLinkSchema = z.object({
+  evidenceUuid: uuidSchema,
+  position: z.number().int().nonnegative(),
+  caption: z.string().default(''),
+  inPath: z.boolean().default(false),
+});
+export type ExportedEvidenceLink = z.infer<typeof exportedEvidenceLinkSchema>;
+
+/**
+ * A finding, with its evidence links. Its category travels by name (resolved
+ * against `findingCategories`), and it keeps its uuid so the engagement's
+ * `strategicRecommendations[].findingUuids` can be remapped on import.
+ */
+export const exportedEngagementFindingSchema = z.object({
+  uuid: uuidSchema,
+  title: z.string().min(1).max(255),
+  description: z.string().default(''),
+  kind: findingKindSchema,
+  affectedTarget: z.string().default(''),
+  impact: z.string().default(''),
+  fixEffort: fixEffortSchema,
+  iso21434Refs: z.array(z.string().max(120)).max(100).default([]),
+  unr155Refs: z.array(z.string().max(120)).max(100).default([]),
+  remediation: z.string().default(''),
+  /** Resolved against `findingCategories` by exact name; unbounded, as there. */
+  category: z.string().nullable().default(null),
+  severity: severitySchema.nullable().default(null),
+  cvssVector: z.string().nullable().default(null),
+  cvssScore: z.number().min(0).max(10).nullable().default(null),
+  readyToReport: z.boolean().default(false),
+  position: z.number().int().nonnegative(),
+  createdAt: isoDateSchema,
+  updatedAt: isoDateSchema,
+  evidenceLinks: z
+    .array(exportedEvidenceLinkSchema)
+    .max(MAX_IMPORT_EVIDENCE_PER_FINDING)
+    .default([]),
+});
+export type ExportedEngagementFinding = z.infer<typeof exportedEngagementFindingSchema>;
+
+/** A saved timeline/findings query (SavedQuery). */
+export const exportedSavedQuerySchema = z.object({
+  name: z.string().min(1).max(255),
+  query: z.string(),
+  type: savedQueryTypeSchema,
+});
+export type ExportedSavedQuery = z.infer<typeof exportedSavedQuerySchema>;
+
+/**
+ * One entry of the engagement's report history (GeneratedReport), including the
+ * stored deliverable's bytes as a `blobs/` entry. As with evidence, the recorded
+ * `sha256`/`sizeBytes` are not carried — they are derived from the entry.
+ */
+export const exportedGeneratedReportSchema = z.object({
+  uuid: uuidSchema,
+  preset: reportPresetSchema,
+  label: z.string(),
+  version: z.string(),
+  format: generatedReportFormatSchema,
+  summary: reportSummarySchema,
+  generatedByEmail: exportedUserEmailSchema,
+  createdAt: isoDateSchema,
+  /** The stored artifact, by content hash; null for rows recorded before artifact
+   *  storage existed (`downloadable: false`) or whose blob could not be read. */
+  artifactBlobHash: contentHashSchema.nullable().default(null),
+  filename: z.string().max(255).nullable().default(null),
+  contentType: z.string().max(255).nullable().default(null),
+});
+export type ExportedGeneratedReport = z.infer<typeof exportedGeneratedReportSchema>;
+
+/**
+ * The engagement row itself, including every JSON column. Two of those columns
+ * hold uuid cross-references into the rest of the file and MUST be remapped on
+ * import — `strategicRecommendations[].findingUuids` and
+ * `executionNarrative[].evidence[].evidenceUuid`. Both are rendered with
+ * skip-if-dangling semantics, so a missed remap reports a successful import and
+ * silently empties those parts of the report. `executionNarrative[].timeline.tags`
+ * also references other rows, but by tag *name*, which an import preserves.
+ *
+ * `slug` and `name` describe the source engagement. An import always creates a new
+ * engagement and derives its own unique slug, so the slug here is provenance, not
+ * an address.
+ */
+export const exportedEngagementSchema = z.object({
+  slug: slugSchema,
+  name: z.string().min(1).max(255),
+  status: engagementStatusSchema,
+  createdAt: isoDateSchema,
+  startedAt: isoDateSchema,
+  projectedEndAt: isoDateSchema.nullable().default(null),
+  actualEndAt: isoDateSchema.nullable().default(null),
+  // Report metadata (Settings → report cover/front matter).
+  clientName: z.string().nullable().default(null),
+  assessmentType: z.string().nullable().default(null),
+  testApproach: z.string().nullable().default(null),
+  location: z.string().nullable().default(null),
+  scope: z.string().nullable().default(null),
+  executiveSummary: z.string().nullable().default(null),
+  methodology: z.string().nullable().default(null),
+  objectivesNarrative: z.string().nullable().default(null),
+  // Watermark settings.
+  watermarkEnabled: z.boolean().default(true),
+  watermarkText: z.string().nullable().default(null),
+  watermarkColor: z.string().nullable().default(null),
+  watermarkOpacity: watermarkOpacitySchema,
+  watermarkLayer: watermarkLayerSchema,
+  // Structured report content — every JSON column on the engagement, reusing the
+  // item schemas that validate them on write rather than restating their fields.
+  scopeTargets: z.array(scopeTargetSchema).default([]),
+  scopeExclusions: z.array(z.string()).default([]),
+  strategicRecommendations: z.array(recommendationItemSchema).default([]),
+  threatModelNarrative: z.string().nullable().default(null),
+  threatModelDiagrams: z.array(threatDiagramSchema).default([]),
+  executionNarrative: z.array(executionSubsectionSchema).default([]),
+  providerContacts: z.array(contactSchema).default([]),
+  clientContacts: z.array(contactSchema).default([]),
+  softwareTested: z.array(softwareItemSchema).default([]),
+  thirdPartySoftware: z.array(softwareItemSchema).default([]),
+  reportConfig: reportConfigSchema,
+  /**
+   * The last imported proposal, verbatim, exactly as the column stores it — kept
+   * for provenance, never interpreted here. Opaque rather than
+   * `proposalSchema`-shaped because the column is deliberately raw: re-validating
+   * it would drop fields a future proposal format adds. Absent when there is none.
+   */
+  proposalImport: z.unknown(),
+});
+export type ExportedEngagement = z.infer<typeof exportedEngagementSchema>;
+
+/** Row counts in an export, so `manifest.json` describes the file's size cheaply. */
+export const engagementExportCountsSchema = z.object({
+  targets: z.number().int().nonnegative(),
+  activities: z.number().int().nonnegative(),
+  goals: z.number().int().nonnegative(),
+  tags: z.number().int().nonnegative(),
+  evidence: z.number().int().nonnegative(),
+  evidenceComments: z.number().int().nonnegative(),
+  findingCategories: z.number().int().nonnegative(),
+  findings: z.number().int().nonnegative(),
+  savedQueries: z.number().int().nonnegative(),
+  generatedReports: z.number().int().nonnegative(),
+  /** Distinct `blobs/` entries, and their total inflated size. */
+  blobs: z.number().int().nonnegative(),
+  blobBytes: z.number().int().nonnegative(),
+});
+export type EngagementExportCounts = z.infer<typeof engagementExportCountsSchema>;
+
+/**
+ * `manifest.json` — the first entry in the container. It exists so a reader can
+ * identify the format, check the version and see how big the import will be
+ * *before* inflating anything: yauzl's central-directory access makes reading one
+ * small entry cheap, and an unsupported version or an implausible size can then be
+ * rejected without touching a blob.
+ */
+export const engagementExportManifestSchema = z.object({
+  format: z.literal(ENGAGEMENT_EXPORT_FORMAT),
+  schemaVersion: z.number().int().positive(),
+  exportedAt: isoDateSchema,
+  /** The source engagement's identity — provenance; the import picks its own slug. */
+  engagement: z.object({ slug: slugSchema, name: z.string() }),
+  counts: engagementExportCountsSchema,
+});
+export type EngagementExportManifest = z.infer<typeof engagementExportManifestSchema>;
+
+/**
+ * `engagement.json` — every record in the export. Collections are flat lists in
+ * dependency order; the goal tree is the one nested block, because its file-local
+ * keys are derived from that nesting.
+ */
+export const engagementExportSchema = z.object({
+  schemaVersion: z.number().int().positive(),
+  exportedAt: isoDateSchema,
+  engagement: exportedEngagementSchema,
+  tags: z.array(exportedTagSchema).max(MAX_ENGAGEMENT_EXPORT_TAGS).default([]),
+  targets: z.array(exportedTargetSchema).max(MAX_ENGAGEMENT_EXPORT_TARGETS).default([]),
+  evidence: z
+    .array(exportedEngagementEvidenceSchema)
+    .max(MAX_ENGAGEMENT_EXPORT_EVIDENCE)
+    .default([]),
+  evidenceComments: z
+    .array(exportedEvidenceCommentSchema)
+    .max(MAX_ENGAGEMENT_EXPORT_COMMENTS)
+    .default([]),
+  findingCategories: z
+    .array(exportedFindingCategorySchema)
+    .max(MAX_ENGAGEMENT_EXPORT_CATEGORIES)
+    .default([]),
+  findings: z.array(exportedEngagementFindingSchema).max(MAX_IMPORT_FINDINGS).default([]),
+  savedQueries: z
+    .array(exportedSavedQuerySchema)
+    .max(MAX_ENGAGEMENT_EXPORT_SAVED_QUERIES)
+    .default([]),
+  generatedReports: z
+    .array(exportedGeneratedReportSchema)
+    .max(MAX_ENGAGEMENT_EXPORT_GENERATED_REPORTS)
+    .default([]),
+});
+export type EngagementExport = z.infer<typeof engagementExportSchema>;
+
+/**
+ * Optional overrides a caller may send alongside the uploaded archive.
+ *
+ * Note what is *absent*: there is no field naming an engagement to import into.
+ * An import always creates a new engagement — the route has no `:slug` — so the
+ * only thing a caller can influence is how the new engagement is named.
+ */
+export const engagementImportInput = z.object({
+  /** Name for the new engagement; defaults to the source engagement's name. */
+  name: z.string().min(1).max(255).optional(),
+  /**
+   * Slug for the new engagement. Omitted, the file's slug is uniquified; supplied
+   * and already taken, the import fails rather than silently landing elsewhere.
+   */
+  slug: slugSchema.optional(),
+});
+export type EngagementImportInput = z.infer<typeof engagementImportInput>;
+
+/** Row counts actually created, so a caller can report more than "done". */
+export const engagementImportCreatedSchema = z.object({
+  targets: z.number().int().nonnegative(),
+  activities: z.number().int().nonnegative(),
+  goals: z.number().int().nonnegative(),
+  tags: z.number().int().nonnegative(),
+  evidence: z.number().int().nonnegative(),
+  evidenceComments: z.number().int().nonnegative(),
+  findingCategories: z.number().int().nonnegative(),
+  findings: z.number().int().nonnegative(),
+  /** Evidence↔finding links (Attack Path + attached evidence). */
+  evidenceLinks: z.number().int().nonnegative(),
+  goalEvidenceLinks: z.number().int().nonnegative(),
+  goalFindingLinks: z.number().int().nonnegative(),
+  savedQueries: z.number().int().nonnegative(),
+  generatedReports: z.number().int().nonnegative(),
+  /** Blob-store objects written, and their total size. */
+  blobs: z.number().int().nonnegative(),
+  blobBytes: z.number().int().nonnegative(),
+});
+export type EngagementImportCreated = z.infer<typeof engagementImportCreatedSchema>;
+
+/**
+ * Everything the import deliberately did NOT carry over. Reported rather than
+ * logged so the UI can be honest: all of these are silent at render time, which is
+ * exactly why they have to be surfaced here.
+ */
+export const engagementImportDroppedSchema = z.object({
+  /** Exported author emails with no local account (distinct, capped). */
+  unmatchedAuthorEmails: z.array(z.string()).default([]),
+  /** Author columns left null because of the above. */
+  unmatchedAuthorRefs: z.number().int().nonnegative(),
+  /** Tag names referenced by evidence or activities that the file never defines. */
+  unknownTagRefs: z.number().int().nonnegative(),
+  /** Evidence uuids referenced by something in the file that defines no such evidence. */
+  danglingEvidenceRefs: z.number().int().nonnegative(),
+  /** Finding uuids referenced by something in the file that defines no such finding. */
+  danglingFindingRefs: z.number().int().nonnegative(),
+  /** Link/name rows collapsed because the file listed the same pair twice. */
+  duplicates: z.number().int().nonnegative(),
+});
+export type EngagementImportDropped = z.infer<typeof engagementImportDroppedSchema>;
+
+/** What an import created, rewrote and dropped — the import route's response. */
+export const engagementImportResultSchema = z.object({
+  /** The engagement that was created — never one that already existed. */
+  engagement: z.object({ slug: slugSchema, name: z.string() }),
+  /** Where it came from (the file's own identity) — provenance, not an address. */
+  source: z.object({ slug: slugSchema, name: z.string(), exportedAt: z.string() }),
+  created: engagementImportCreatedSchema,
+  /**
+   * The uuid cross-references rewritten to the new rows' uuids. Surfaced because
+   * both are skip-if-dangling at render time: a count of zero where the report
+   * content referenced rows is the only visible sign that a remap went wrong.
+   */
+  remapped: z.object({
+    recommendationFindingRefs: z.number().int().nonnegative(),
+    narrativeEvidenceRefs: z.number().int().nonnegative(),
+  }),
+  dropped: engagementImportDroppedSchema,
+});
+export type EngagementImportResult = z.infer<typeof engagementImportResultSchema>;

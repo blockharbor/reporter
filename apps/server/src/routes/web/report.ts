@@ -29,6 +29,7 @@ import {
 import { importFindings } from '../../services/findings-import.js';
 import { getReportTemplateConfig } from '../../services/report-templates.js';
 import { slugify } from '../../helpers/slug.js';
+import { stamp } from '../../helpers/filename.js';
 import {
   findReportForLetter,
   listReportHistory,
@@ -97,18 +98,6 @@ function groupParam(v: unknown): EvidenceGrouping {
 function findingGroupParam(v: unknown): FindingGrouping {
   const parsed = findingGroupingSchema.safeParse(v);
   return parsed.success ? parsed.data : 'severity';
-}
-
-/**
- * A filename timestamp down to the second (local time), so repeated exports on
- * the same day get distinct names: `2026-08-20-143052`.
- */
-function stamp(): string {
-  const d = new Date();
-  const p = (n: number): string => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(
-    d.getMinutes(),
-  )}${p(d.getSeconds())}`;
 }
 
 /** The `?preset` query param ("report type"), defaulting to the saved custom config. */

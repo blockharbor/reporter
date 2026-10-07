@@ -10,6 +10,34 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ### Added
 
+- **Full engagement export — one `.zip` that recreates an entire engagement on
+  another reporter server.** **Settings → Export engagement** downloads the whole
+  thing: the engagement's details and all of its report content, its Targets,
+  Activities and Goals, its Tags, every piece of Evidence **including the stored file
+  content** (screenshots, terminal recordings, thumbnails), comments on evidence,
+  every Finding with its categories and evidence links, the saved queries, and the
+  report history together with the exact files that were generated. A backup is not a
+  deliverable, so Evidence marked **Excluded from reports** travels too, still
+  flagged. This is separate from the existing findings-scoped JSON export, which is
+  for moving findings between engagements and is unchanged.
+- **Import engagement always creates a new engagement.** On **Engagements**, a site
+  admin can restore an engagement from an export archive. It can never modify,
+  overwrite or merge into an engagement that already exists — there is no way to ask
+  it to, because the import address names no engagement. The new slug comes from the
+  file (made unique if taken) or from whoever imports it, and an explicit slug that is
+  already in use is refused rather than landing somewhere unexpected. The result
+  reports what was created, which report references were rewritten to the new rows,
+  and everything that was deliberately left behind.
+- **An import never creates an account, and never shares the original's files.**
+  Evidence and comment bylines travel as email addresses and are matched to accounts
+  on the destination server; with no match the byline shows as **Deleted user**. Every
+  stored file is re-saved under a fresh key, so deleting an imported engagement cannot
+  destroy the original's evidence or report artifacts. Membership is not in the file —
+  whoever imports becomes the new engagement's admin — and neither are favorites, API
+  keys, sessions, or the destination's own site-wide report branding and templates.
+  The archive is validated in full before a single row is written, and a failed import
+  leaves nothing behind.
+
 - **Report templates — a site-wide library of named report configurations.** Save
   the configuration you built on **Reports → Configure** under a name, and any
   engagement can reproduce the same kind of report. A template captures the section
@@ -137,6 +165,12 @@ timestamps` and `Show evidence operators` decide whether evidence capture times 
 
 ### Fixed
 
+- **A derived slug no longer overflows the 64-character limit.** When a slug is
+  already taken, the server appends `-2`, `-3`, … — and a base that was already at
+  the limit pushed the result past it, producing a slug no form or route would
+  accept. The suffix now makes room for itself. This was reachable by importing an
+  engagement whose slug was at the limit onto the server it came from, where it
+  failed _after_ the engagement had been written.
 - **Re-importing a report-filtered export no longer detaches withheld evidence.**
   The deliverable JSON export leaves report-excluded evidence out, and the importer
   reconciled a finding's evidence links to exactly the file's list — so importing a

@@ -28,6 +28,7 @@
     "otpauth": "^9.3.6",
     "puppeteer": "^23.11.1",
     "sharp": "^0.33.5",
+    "yauzl": "^2.10.0",
     "zod": "^3.24.1"
   },
   "optionalDependencies": {
@@ -37,6 +38,7 @@
     "@types/archiver": "^5.3.4",
     "@types/busboy": "^1.5.4",
     "@types/node": "^22.10.5",
+    "@types/yauzl": "^2.10.3",
     "pino-pretty": "^13.0.0",
     "prisma": "^6.2.1",
     "tsx": "^4.19.2",
