@@ -40,6 +40,16 @@ export const ROLE_RANK: Record<EngagementRole, number> = { admin: 3, write: 2, r
 export const DELETED_USER_LABEL = 'Deleted user';
 
 /**
+ * The one wording for the report-exclusion state. Every surface that lists
+ * evidence shares it — the web timeline, finding cards and pickers, and the
+ * desktop tray's "Link to" picker — so none of them can describe the same flag
+ * differently. It lives here rather than in the web app because the Electron
+ * renderer cannot import from `apps/web`, and a second copy is exactly how the
+ * two would drift.
+ */
+export const EXCLUDED_FROM_REPORT_LABEL = 'Excluded from reports';
+
+/**
  * Why a user cannot be deleted (or demoted / disabled). The server raises these as
  * its 400 message and the Admin panel shows the same string as the disabled
  * button's tooltip, so they live here: if the two ever drifted, the UI would

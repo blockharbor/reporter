@@ -1,9 +1,10 @@
 import { Badge } from '@reporter/ui';
-import type { Evidence } from '@reporter/shared';
+import { EXCLUDED_FROM_REPORT_LABEL, type Evidence } from '@reporter/shared';
 
-/** The one wording for the report-exclusion state, shared by every surface that
- *  lists evidence so the timeline, finding cards and the pickers all agree. */
-export const EXCLUDED_FROM_REPORT_LABEL = 'Excluded from reports';
+/** Re-exported so the many web callers keep importing the wording from the badge
+ *  that renders it; the definition lives in @reporter/shared because the desktop
+ *  tray needs it too. */
+export { EXCLUDED_FROM_REPORT_LABEL };
 
 /** What the flag actually does — the hint under the detail-page toggle and the
  *  tooltip on every badge. Precise about the two edges an operator would

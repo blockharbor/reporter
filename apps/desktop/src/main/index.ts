@@ -257,11 +257,7 @@ function registerIpc(): void {
 
   ipcMain.handle(
     CH.createTag,
-    async (
-      _e,
-      slug: string,
-      input: { name: string; colorName: string },
-    ): Promise<TagLite> => {
+    async (_e, slug: string, input: { name: string; colorName: string }): Promise<TagLite> => {
       const client = makeClient();
       if (!client) throw new Error('Server URL and API key are required.');
       const t = await client.createTag(slug, input);
@@ -285,6 +281,7 @@ function registerIpc(): void {
         description: e.description,
         contentType: e.contentType,
         occurredAt: e.occurredAt,
+        excludeFromReport: e.excludeFromReport,
       }));
   });
 

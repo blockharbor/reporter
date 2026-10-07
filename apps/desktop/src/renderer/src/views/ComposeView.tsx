@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { EVIDENCE_TYPE_LABELS, defaultTagColorFor, type EvidenceType } from '@reporter/shared';
+import {
+  EVIDENCE_TYPE_LABELS,
+  EXCLUDED_FROM_REPORT_LABEL,
+  defaultTagColorFor,
+  type EvidenceType,
+} from '@reporter/shared';
 import {
   Button,
   EmptyState,
@@ -41,7 +46,13 @@ function evidenceOptionLabel(ev: EvidenceLite): string {
         hour: 'numeric',
         minute: '2-digit',
       });
-  return stamp ? `${base} · ${stamp}` : base;
+  const withStamp = stamp ? `${base} · ${stamp}` : base;
+  // A <select> option can only carry text, so the badge the web UI renders
+  // becomes a prefix and a suffix here. Both, because the prefix survives the
+  // truncation a long title causes in a narrow tray window.
+  return ev.excludeFromReport
+    ? `⊘ ${withStamp} — ${EXCLUDED_FROM_REPORT_LABEL.toLowerCase()}`
+    : withStamp;
 }
 
 export function ComposeView({
@@ -318,6 +329,15 @@ export function ComposeView({
               </option>
             ))}
           </Select>
+          {/* Exclusion is inherited at read time, so linking under an excluded
+              capture withholds THIS capture from every report while its own flag
+              stays clear — invisible unless we say so before the link is made. */}
+          {evidenceOptions.some((ev) => ev.uuid === parentEvidenceUuid && ev.excludeFromReport) && (
+            <p className="mt-1 text-xs text-warning">
+              That evidence is excluded from reports, so this capture will be left out of them too.
+              It stays visible in the web app, and un-excluding the evidence brings both back.
+            </p>
+          )}
         </Field>
       )}
 

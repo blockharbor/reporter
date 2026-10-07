@@ -68,6 +68,11 @@ export interface EvidenceLite {
   description: string;
   contentType: string;
   occurredAt: string;
+  /** Whether this evidence is withheld from report output. Carried into the
+   *  picker because exclusion is inherited: filing a capture under an excluded
+   *  parent withholds the new capture too, with its own flag clear, so the tray
+   *  has to say so before the link is made. */
+  excludeFromReport: boolean;
 }
 
 export interface TagLite {
