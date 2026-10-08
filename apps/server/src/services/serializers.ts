@@ -199,6 +199,7 @@ export function serializeEvidence(e: EvidenceWithRelations, engagementSlug: stri
     title: e.title,
     description: e.description,
     contentType: e.contentType as Evidence['contentType'],
+    contentSubtype: e.contentSubtype,
     originalFilename: e.originalFilename,
     occurredAt: e.occurredAt.toISOString(),
     createdAt: e.createdAt.toISOString(),

@@ -3,14 +3,16 @@ import type { FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import {
+  MAX_SCRIPT_BYTES,
+  SCRIPT_TOO_LARGE_REASON,
   createEvidenceCommentInput,
+  evidenceCarriesSubtype,
+  evidenceFileExtension,
+  isEditableTextEvidence,
   parseQuery,
   updateEvidenceCommentInput,
   updateEvidenceInput,
 } from '@reporter/shared';
-
-/** Evidence content types whose body is editable text (stored as a blob). */
-const EDITABLE_TEXT_TYPES = new Set(['none', 'event', 'codeblock', 'http-request-cycle']);
 import { requireAuth, requireEngagementRole, HttpError } from '../../auth/guards.js';
 import { parsePagination } from '../../helpers/pagination.js';
 import { createEvidence, listEvidence } from '../../services/evidence.js';
@@ -23,6 +25,56 @@ import { evidenceContentMime, parseEvidenceRequest } from '../shared-evidence.js
 
 async function engagementBySlug(app: FastifyInstance, slug: string) {
   return app.db.engagement.findUniqueOrThrow({ where: { slug } });
+}
+
+/** The fields {@link evidenceDisposition} needs to name a download. */
+interface DownloadNameable {
+  originalFilename: string | null;
+  contentType: string;
+  contentSubtype: string | null;
+  uuid: string;
+}
+
+/**
+ * Build the `Content-Disposition` header for a served evidence blob.
+ *
+ * `attachment` for everything except screenshots. Nothing in the web app *navigates*
+ * to a code block, a script, a HAR or an asciicast: `useEvidenceText` and the
+ * evidence viewers read them with `fetch().text()` and the terminal player hands the
+ * URL to asciinema, and `Content-Disposition` is only consulted when a response is
+ * navigated to — never when it is fetched as a subresource. So this costs those
+ * viewers nothing, while a hand-typed or pasted content URL downloads the bytes
+ * instead of asking the browser to render operator-supplied text.
+ *
+ * Screenshots stay `inline` because they are the one case the app really does render
+ * as a browser-managed subresource (`<img src>` in `ImageViewer`). Browsers ignore
+ * the header for `<img>` either way, but claiming `attachment` for a resource we
+ * deliberately display inline is a lie the next reader would have to re-derive.
+ * Inline is safe on the image branch's own terms: its MIME comes from sniffing magic
+ * bytes against a fixed list of raster formats, so an SVG or an HTML page renamed
+ * `.png` is served `application/octet-stream`, not markup.
+ *
+ * The filename is a download hint only — never a path. It comes from
+ * `originalFilename`, which is operator-supplied, so it is reduced to a conservative
+ * ASCII subset for the quoted form: a bare CR or LF in a header value is a response
+ * splitting attempt, and Node would reject the whole reply rather than send it. The
+ * RFC 6266 `filename*` parameter carries the real UTF-8 name for clients that read
+ * it.
+ */
+function evidenceDisposition(ev: DownloadNameable): string {
+  const type = ev.contentType === 'image' ? 'inline' : 'attachment';
+  const base = ev.originalFilename?.split(/[\\/]/).pop()?.trim();
+  const name = (
+    base ||
+    `${ev.contentType}-${ev.uuid.slice(0, 8)}${evidenceFileExtension(ev.contentType, ev.contentSubtype)}`
+  ).slice(0, 120);
+  const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_') || 'evidence';
+  // encodeURIComponent leaves ' ( ) * alone; they are not RFC 5987 attr-chars.
+  const utf8 = encodeURIComponent(name).replace(
+    /['()*]/g,
+    (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
+  return `${type}; filename="${ascii}"; filename*=UTF-8''${utf8}`;
 }
 
 export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
@@ -133,7 +185,31 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       const ev = await app.db.evidence.findFirst({ where: { uuid, engagementId: eng.id } });
       if (!ev || !ev.fullBlobKey) throw new HttpError(404, 'No content for this evidence');
       const blob = await app.blobs.getBuffer(ev.fullBlobKey);
+      // INVARIANT: the MIME served here is derived from the *evidence type* (plus,
+      // for images, sniffed magic bytes against a closed list of raster formats) and
+      // never from the uploaded file's own Content-Type. That is load-bearing, not a
+      // shortcut. Evidence is same-origin with the session cookie, so echoing an
+      // uploader's `image/svg+xml` or `text/html` back here would turn any upload
+      // into stored XSS against every reviewer who opens it — one evidence item to
+      // read any engagement the viewer can see. Keep `evidenceContentMime` answering
+      // from its fixed list; never pass `file.mimeType` through to a response.
       reply.header('Content-Type', evidenceContentMime(ev.contentType, blob));
+      // Defence in depth behind that invariant: no MIME sniffing, so a text/plain
+      // body that happens to open with `<html>` is not re-read as markup, and an
+      // `application/octet-stream` image is not promoted to anything renderable.
+      //
+      // It does not cost us the one response the browser fetches for itself. An
+      // image whose format is outside `evidenceContentMime`'s raster list (AVIF,
+      // HEIC, BMP…) is served `application/octet-stream`, and `nosniff` + a
+      // non-image type sounds like it should break `<img>`. It does not here: per
+      // Fetch, nosniff only turns a response into a network error for the `script`
+      // and `style` destinations, and Chrome's opaque-response blocking — which does
+      // reject nosniff'd non-media types — applies to cross-origin no-cors responses
+      // only, while every evidence `<img src>` in the app is same-origin. The
+      // timeline is insulated regardless: it renders `thumbBlobKey`, which is always
+      // a sharp-re-encoded JPEG.
+      reply.header('X-Content-Type-Options', 'nosniff');
+      reply.header('Content-Disposition', evidenceDisposition(ev));
       reply.header('Cache-Control', 'private, max-age=3600');
       return reply.send(blob);
     },
@@ -149,7 +225,13 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       const ev = await app.db.evidence.findFirst({ where: { uuid, engagementId: eng.id } });
       if (!ev || !ev.thumbBlobKey) throw new HttpError(404, 'No thumbnail');
       const blob = await app.blobs.getBuffer(ev.thumbBlobKey);
+      // Not a guess: a thumbnail is always a JPEG this server re-encoded with sharp,
+      // so none of the uploaded bytes survive into it. `nosniff` is still set, since
+      // the whole point of the header is that no response on this origin invites the
+      // browser to second-guess a declared type. No disposition: thumbnails exist to
+      // be rendered inline in timeline rows (`<img src>`), which is the default.
       reply.header('Content-Type', 'image/jpeg');
+      reply.header('X-Content-Type-Options', 'nosniff');
       reply.header('Cache-Control', 'private, max-age=86400');
       return reply.send(blob);
     },
@@ -285,9 +367,9 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // Update title / description / tags / occurredAt / report exclusion, and optionally
-  // re-parent the evidence (attach/move/detach its comment link) via
-  // `parentEvidenceUuid`.
+  // Update title / description / tags / occurredAt / report exclusion / body text /
+  // language-interpreter, and optionally re-parent the evidence (attach/move/detach
+  // its comment link) via `parentEvidenceUuid`.
   app.put(
     '/engagements/:slug/evidence/:uuid',
     { preHandler: [requireAuth, requireEngagementRole('write')] },
@@ -314,10 +396,27 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       // editable body; images/recordings keep their uploaded file. The new blob is
       // written up front (outside the DB tx, mirroring create); the old one is
       // reclaimed only after the row update commits. Empty content clears the blob.
+      // Which types have an editable body is decided once, in `EVIDENCE_TEXT_EDITABLE`
+      // — a hand-copied list here is how this route came to reject a `content` update
+      // for a type the web app was happily offering an editor for.
       const editingContent = body.content !== undefined;
-      if (editingContent && !EDITABLE_TEXT_TYPES.has(ev.contentType)) {
+      if (editingContent && !isEditableTextEvidence(ev.contentType)) {
         throw new HttpError(400, "This evidence type's content can't be edited.");
       }
+
+      // Language / interpreter edit. Correctable on purpose: for a script this value
+      // chooses the extension the supporting-files ZIP entry gets, so a typo in it
+      // mis-names a file handed to a client, and re-creating the evidence was the only
+      // remedy while the column was write-once. Refused outright for a type that has
+      // no reader for it (`evidenceCarriesSubtype`) rather than stored and ignored.
+      // Blank normalizes to null, so "no interpreter" is one value in the column.
+      const editingSubtype = body.contentSubtype !== undefined;
+      if (editingSubtype && !evidenceCarriesSubtype(ev.contentType)) {
+        throw new HttpError(400, "This evidence type doesn't carry a language or interpreter.");
+      }
+      const subtypePatch = editingSubtype
+        ? { contentSubtype: body.contentSubtype?.trim() || null }
+        : undefined;
       let blobPatch:
         { fullBlobKey: string | null; sha256: string | null; sizeBytes: number | null } | undefined;
       if (editingContent) {
@@ -325,6 +424,11 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
         if (text === '') {
           blobPatch = { fullBlobKey: null, sha256: null, sizeBytes: null };
         } else {
+          // The script cap applies to an edit as well as a create, or a 1 KB script
+          // could be grown past it by the very editor the cap exists to protect.
+          if (ev.contentType === 'script' && Buffer.byteLength(text, 'utf8') > MAX_SCRIPT_BYTES) {
+            throw new HttpError(413, SCRIPT_TOO_LARGE_REASON);
+          }
           const buf = Buffer.from(text, 'utf8');
           const key = randomUUID();
           await app.blobs.put(key, buf);
@@ -393,6 +497,8 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
             ...(reparent ? { parentEvidenceId } : {}),
             // Swap the content blob when the body was edited.
             ...(blobPatch ?? {}),
+            // Re-name the language / interpreter when that field was present.
+            ...(subtypePatch ?? {}),
           },
         });
         if (body.tagIds) {

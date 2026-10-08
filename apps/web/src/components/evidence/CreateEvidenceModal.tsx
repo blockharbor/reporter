@@ -7,11 +7,18 @@ import {
   Modal,
   Select,
   TagPicker,
+  Textarea,
   useToast,
 } from '@reporter/ui';
 import {
+  EVIDENCE_TYPE_ICONS,
   EVIDENCE_TYPE_LABELS,
+  MAX_SCRIPT_BYTES,
+  SCRIPT_EMPTY_REASON,
+  SCRIPT_TOO_LARGE_REASON,
   defaultTagColorFor,
+  evidenceCarriesSubtype,
+  evidenceFileExtension,
   type CreateEvidenceInput,
   type EvidenceType,
 } from '@reporter/shared';
@@ -20,7 +27,33 @@ import { useCreateEvidence, useCreateTag, useTags } from '../../api/hooks.js';
 import { useEngagementPermissions } from '../../lib/permissions.js';
 import { useUnsavedGuard } from '../../hooks/useUnsavedGuard.js';
 
-const CREATABLE: EvidenceType[] = ['image', 'codeblock', 'none', 'event', 'http-request-cycle'];
+/**
+ * The types this form can produce, in offer order. A deliberate subset of
+ * `EVIDENCE_TYPES`: a terminal recording comes from `reporter-term`, never from a
+ * person filling in a form.
+ */
+const CREATABLE: EvidenceType[] = [
+  'image',
+  'codeblock',
+  'script',
+  'none',
+  'event',
+  'http-request-cycle',
+];
+
+/** {@link MAX_SCRIPT_BYTES} in whole MB, for the script field's size hint. */
+const MAX_SCRIPT_MB = MAX_SCRIPT_BYTES / 1024 / 1024;
+
+/**
+ * Whether a drag carries files, so a text drag can be left to the browser.
+ *
+ * `dataTransfer.files` is empty until `drop`, so `types` is the only thing a
+ * dragover can read. It is a read-only `DOMStringList`-alike in the DOM but a
+ * plain `readonly string[]` in React's synthetic event, hence `includes`.
+ */
+function dragHasFiles(e: React.DragEvent): boolean {
+  return Array.from(e.dataTransfer.types).includes('Files');
+}
 
 export function CreateEvidenceModal({
   slug,
@@ -70,15 +103,29 @@ export function CreateEvidenceModal({
   const [dragging, setDragging] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const scriptFileInputRef = useRef<HTMLInputElement>(null);
   const [tagIds, setTagIds] = useState<number[]>([]);
 
   const needsFile = type === 'image';
+  // Script is the one type that takes *either* a typed body or an uploaded file,
+  // and the only one whose body is rendered verbatim rather than as markdown.
+  const isScript = type === 'script';
   const needsText = type !== 'image';
+  // Both text-code types record a language/interpreter in `contentSubtype`. For a
+  // script it also names the entry in the report's supporting-files ZIP.
+  const carriesSubtype = evidenceCarriesSubtype(type);
   // Title is required; the type-specific content/file inputs still gate submit.
   const hasTitle = evTitle.trim().length > 0;
+  const hasText = content.trim().length > 0;
   const canSubmit =
     hasTitle &&
-    (needsFile ? Boolean(file) : content.trim().length > 0 || description.trim().length > 0);
+    (needsFile
+      ? Boolean(file)
+      : isScript
+        ? // A script with neither a body nor a file has nothing to render, so —
+          // unlike a note — a description on its own is not enough.
+          Boolean(file) || hasText
+        : hasText || description.trim().length > 0);
 
   // Dirty when the operator has entered anything beyond the default type. Used to
   // trigger the discard-confirm on close/cancel/Esc/backdrop.
@@ -94,16 +141,30 @@ export function CreateEvidenceModal({
     [evTitle, description, content, language, file, tagIds, type],
   );
 
+  /**
+   * Drop the picked file, for both file inputs.
+   *
+   * The `value = ''` matters: a file input holds its own selection, and leaving it
+   * set means re-picking the *same* file fires no `change` event — so after
+   * switching type away and back, choosing that file again would appear to do
+   * nothing. React does not clear it for us; the elements are not remounted.
+   */
+  const clearFile = useCallback(() => {
+    setFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (scriptFileInputRef.current) scriptFileInputRef.current.value = '';
+  }, []);
+
   const reset = useCallback(() => {
     setType('image');
     setEvTitle('');
     setDescription('');
     setContent('');
     setLanguage('');
-    setFile(null);
+    clearFile();
     setDragging(false);
     setTagIds([]);
-  }, []);
+  }, [clearFile]);
 
   const { requestClose } = useUnsavedGuard({
     isDirty,
@@ -133,15 +194,42 @@ export function CreateEvidenceModal({
   );
 
   // Live object-URL preview of the chosen image; revoked when it changes/unmounts.
+  // Screenshots only — an uploaded script is shown by name and size instead.
   useEffect(() => {
-    if (!file) {
+    if (!file || type !== 'image') {
       setPreviewUrl(null);
       return;
     }
     const url = URL.createObjectURL(file);
     setPreviewUrl(url);
     return () => URL.revokeObjectURL(url);
-  }, [file]);
+  }, [file, type]);
+
+  // Accept a script from the file picker. No MIME check on purpose (see the input
+  // below); size is checked against the same shared cap the server enforces, so an
+  // oversized file is refused before it is uploaded rather than after.
+  const selectScriptFile = useCallback(
+    (f: File | null | undefined) => {
+      if (!f) return;
+      if (f.size > MAX_SCRIPT_BYTES) {
+        toast.error(SCRIPT_TOO_LARGE_REASON);
+        return;
+      }
+      // An empty file would submit and be refused server-side; saying so here means
+      // the operator finds out while the picker is still in mind. Both refusals quote
+      // the shared reason, so the two cannot describe the same thing differently.
+      if (f.size === 0) {
+        toast.error(SCRIPT_EMPTY_REASON);
+        return;
+      }
+      setFile(f);
+    },
+    [toast],
+  );
+
+  // Drop the uploaded script and go back to the editor; the typed draft is still in
+  // state, so Remove restores it.
+  const clearScriptFile = clearFile;
 
   // Paste an image from the clipboard anywhere in the modal (screenshot type only).
   useEffect(() => {
@@ -165,20 +253,23 @@ export function CreateEvidenceModal({
   }, [open, type, selectImage]);
 
   async function submit() {
+    // An uploaded file wins over typed text: while one is selected the editor is
+    // hidden, and the draft is kept in state only so Remove can restore it.
+    const upload = (needsFile || isScript) && file ? file : undefined;
     const metadata: CreateEvidenceInput = {
       contentType: type,
       title: evTitle.trim(),
       description,
       tagIds,
-      content: needsText ? content : undefined,
-      contentSubtype: type === 'codeblock' && language ? language : undefined,
+      content: needsText && !upload ? content : undefined,
+      contentSubtype: carriesSubtype && language.trim() ? language.trim() : undefined,
       parentEvidenceUuid,
       // New evidence is always report-eligible. Excluding it is a deliberate,
       // reversible call made afterwards from the evidence's own Report card.
       excludeFromReport: false,
     };
     try {
-      await create.mutateAsync({ metadata, file: needsFile && file ? file : undefined });
+      await create.mutateAsync({ metadata, file: upload });
       toast.success(isComment ? 'Comment added' : 'Evidence added');
       reset();
       onClose();
@@ -210,7 +301,13 @@ export function CreateEvidenceModal({
             <Select
               id="ev-type"
               value={type}
-              onChange={(e) => setType(e.target.value as EvidenceType)}
+              onChange={(e) => {
+                // A file picked for one type means nothing to the next (a PNG is
+                // not a script), so switching type drops it rather than carrying
+                // it into a form that would send it.
+                clearFile();
+                setType(e.target.value as EvidenceType);
+              }}
             >
               {CREATABLE.map((t) => (
                 <option key={t} value={t}>
@@ -219,8 +316,19 @@ export function CreateEvidenceModal({
               ))}
             </Select>
           </Field>
-          {type === 'codeblock' && (
-            <Field label="Language" htmlFor="ev-lang" hint="Optional">
+          {carriesSubtype && (
+            <Field
+              label={isScript ? 'Interpreter' : 'Language'}
+              htmlFor="ev-lang"
+              hint={
+                isScript
+                  ? // The resolved extension, not a promise to use the word typed: an
+                    // interpreter the server cannot map is delivered as `.txt` rather
+                    // than as a made-up extension, and this is where that is visible.
+                    `Optional · names the file in the report ZIP (${evidenceFileExtension('script', language)})`
+                  : 'Optional'
+              }
+            >
               <Input
                 id="ev-lang"
                 value={language}
@@ -298,8 +406,7 @@ export function CreateEvidenceModal({
                     variant="ghost"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setFile(null);
-                      if (fileInputRef.current) fileInputRef.current.value = '';
+                      clearFile();
                     }}
                   >
                     Remove
@@ -322,6 +429,107 @@ export function CreateEvidenceModal({
                 className="hidden"
                 onChange={(e) => selectImage(e.target.files?.[0])}
               />
+            </div>
+          </Field>
+        ) : isScript ? (
+          /*
+           * Script is the only type that takes either typed text or a file, and
+           * both land in the same place — the server decodes an upload to UTF-8
+           * and stores it exactly like a typed body. So this stays one field with
+           * two ways in rather than a second panel: the editor is what you see,
+           * and the "Choose a file" row beneath it is always visible. Picking a
+           * file swaps the editor for a summary row; Remove brings the typed draft
+           * back, so neither path discards the other's work.
+           */
+          <Field
+            label="Script"
+            // The label points at the editor, which is not mounted while a file is
+            // selected — the file row names itself instead.
+            htmlFor={file ? undefined : 'ev-content'}
+            hint={
+              file
+                ? 'Stored as text, so you can edit it after saving.'
+                : `Shown verbatim in the report, never as markdown. Up to ${MAX_SCRIPT_MB} MB of text.`
+            }
+          >
+            <div
+              // A `.sh` dragged onto a bare textarea makes the browser navigate to
+              // the file and take the half-filled form with it, so the field
+              // accepts the drop itself — same gesture as the screenshot dropzone.
+              // Only a *file* drag is intercepted. Calling preventDefault on every
+              // drag would also kill the browser's native text drop, so dragging a
+              // selection into the editor — or reordering text inside it — would
+              // silently do nothing.
+              onDragOver={(e) => {
+                if (!dragHasFiles(e)) return;
+                e.preventDefault();
+                setDragging(true);
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+              }}
+              onDrop={(e) => {
+                if (!dragHasFiles(e)) return;
+                e.preventDefault();
+                setDragging(false);
+                selectScriptFile(e.dataTransfer.files?.[0]);
+              }}
+              className={`flex flex-col gap-2 rounded-input ${dragging ? 'ring-2 ring-accent' : ''}`}
+            >
+              {file ? (
+                <div className="flex items-center gap-3 rounded-input border border-border bg-surface-2 px-3 py-2">
+                  <span aria-hidden className="text-muted">
+                    {EVIDENCE_TYPE_ICONS.script}
+                  </span>
+                  <p className="min-w-0 flex-1 truncate text-sm text-text">
+                    {file.name}
+                    <span className="text-muted">
+                      {` · ${Math.max(1, Math.round(file.size / 1024))} KB`}
+                    </span>
+                  </p>
+                  <Button type="button" size="sm" variant="ghost" onClick={clearScriptFile}>
+                    Remove
+                  </Button>
+                </div>
+              ) : (
+                <Textarea
+                  id="ev-content"
+                  value={content}
+                  onChange={(e) => setContent(e.target.value)}
+                  rows={10}
+                  spellCheck={false}
+                  placeholder={'#!/bin/bash\nset -euo pipefail'}
+                  className="font-mono"
+                />
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => scriptFileInputRef.current?.click()}
+                >
+                  {file ? 'Choose a different file' : 'Choose a file'}
+                </Button>
+                <span className="text-xs text-muted">
+                  {file ? 'Or remove it to type the script here.' : 'Or drag one onto the editor.'}
+                </span>
+                {/*
+                 * No `accept`: scripts have no dependable MIME type (`.sh` arrives
+                 * as application/x-sh, text/x-shellscript or nothing at all,
+                 * depending on the OS) and a filter would grey out legitimate
+                 * files in the picker. The server is the authority — it decodes
+                 * the bytes and refuses anything that is not UTF-8 text.
+                 */}
+                <input
+                  ref={scriptFileInputRef}
+                  id="ev-script-file"
+                  type="file"
+                  aria-label="Choose a script file"
+                  className="hidden"
+                  onChange={(e) => selectScriptFile(e.target.files?.[0])}
+                />
+              </div>
             </div>
           </Field>
         ) : type === 'http-request-cycle' ? (

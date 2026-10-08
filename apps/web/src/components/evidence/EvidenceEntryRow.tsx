@@ -1,21 +1,12 @@
 import { Link } from 'react-router-dom';
 import { Badge, TagChip, useToast } from '@reporter/ui';
-import { EVIDENCE_TYPE_LABELS, type Evidence } from '@reporter/shared';
+import { EVIDENCE_TYPE_ICONS, EVIDENCE_TYPE_LABELS, type Evidence } from '@reporter/shared';
 import { useToggleEvidenceStar } from '../../api/hooks.js';
 import { evidenceHeading, evidenceSnippet } from '../../lib/evidence-label.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
 import { userDisplayName } from '../../lib/user-display.js';
 import { EvidenceExclusionBadge } from './ExcludedFromReportBadge.js';
 import { TimestampRail } from './TimestampRail.js';
-
-const TYPE_ICON: Record<string, string> = {
-  image: '🖼',
-  codeblock: '⌨',
-  'terminal-recording': '▸',
-  'http-request-cycle': '⇄',
-  event: '⚑',
-  none: '✎',
-};
 
 /** Per-user star toggle. Rendered as a sibling of the row Link, never inside it. */
 function StarButton({ slug, ev }: { slug: string; ev: Evidence }) {
@@ -59,7 +50,7 @@ export function EvidenceEntryRow({ slug, ev }: { slug: string; ev: Evidence }) {
             />
           ) : (
             <div className="flex h-full w-full items-center justify-center text-lg text-muted">
-              {TYPE_ICON[ev.contentType] ?? '•'}
+              {EVIDENCE_TYPE_ICONS[ev.contentType]}
             </div>
           )}
         </div>

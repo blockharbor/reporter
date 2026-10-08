@@ -223,8 +223,8 @@ export function ReportTemplateControls({
             configuration?
           </span>
           <span className="block">
-            Replaces the current section selection and order, the findings grouping, and the
-            evidence-log options with the template’s.
+            Replaces the current section selection and order, each section’s display choices, the
+            findings grouping, and the evidence-log options with the template’s.
           </span>
           <span className="block">
             Custom sections from the template are merged in — one that shares an id with yours is

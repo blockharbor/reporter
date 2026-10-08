@@ -213,6 +213,20 @@ export const reportConfigSchema = z.object({
   /** How that evidence log is grouped. */
   evidenceGroup: evidenceGroupingSchema.default('chronological'),
   /**
+   * Number the Assessment Execution subsection titles — "1. Infotainment head
+   * unit", "2. CAN gateway", … — in the order they already render.
+   *
+   * Purely a labelling change: it reorders nothing, renumbers nothing else, and
+   * never touches the stored titles. It applies to the hand-authored subsection
+   * headings only — every entry in `executionNarrative`, whichever `kind` it is,
+   * since a written narrative and an activity timeline each carry a title their
+   * author wrote — and never to the individual evidence items inside them.
+   *
+   * Defaults to `false`, so an engagement that has never set it keeps the
+   * unnumbered headings its reports have always had.
+   */
+  numberExecutionSubsections: z.boolean().default(false),
+  /**
    * Sanitize option: show each evidence item's capture timestamp in the rendered
    * report (the `when` label on evidence-log items). Defaults to `false` (hidden)
    * so a report never leaks capture times unless the author opts in.
@@ -346,19 +360,46 @@ export type AttestationLetterInput = z.infer<typeof attestationLetterInputSchema
  * The ordered section list for a canned report "type" (everything but `custom`,
  * which renders the engagement's saved configuration). `full` reproduces the
  * default report; `executive` and `findings` are focused subsets.
+ *
+ * A preset decides *which* sections appear and in what order. It deliberately
+ * says nothing about what each one shows inside itself, so `configured` — the
+ * engagement's own section list — is read for its per-section sub-item `options`,
+ * which are carried onto every section the preset keeps (matched by `key`;
+ * `enabled` and the order stay the preset's).
+ *
+ * Without that carry-over a sub-item set to `false` is silently dropped the moment
+ * a built-in report type is picked, because these entries have no `options` map
+ * and the render convention is absent-means-on. For a formatting sub-item that is
+ * merely surprising; for a *suppression* one it is a disclosure: an author who
+ * turned "Script contents" off because a deploy script carries a client
+ * credential would get every script body printed in full by choosing "Full
+ * report" from the Report type dropdown, with nothing saying so. The two sanitize
+ * flags have always been forwarded onto a preset for precisely that reason, and a
+ * sub-item is the same kind of choice.
  */
 export function reportPresetSections(
   preset: Exclude<ReportPreset, 'custom'>,
+  configured: ReportSectionEntry[] = [],
 ): ReportSectionEntry[] {
+  const optionsByKey = new Map(
+    configured.filter((s) => s.options !== undefined).map((s) => [s.key, s.options]),
+  );
+  const withOptions = (s: ReportSectionEntry): ReportSectionEntry => {
+    const options = optionsByKey.get(s.key);
+    // Keep the key absent rather than `undefined`-valued: the entry is persisted
+    // and compared as-is in places (report history, template digests), and an
+    // explicit `options: undefined` is not the same JSON as no `options` at all.
+    return options ? { ...s, options: { ...options } } : { ...s };
+  };
   switch (preset) {
     case 'full':
-      return DEFAULT_REPORT_SECTIONS.map((s) => ({ ...s }));
+      return DEFAULT_REPORT_SECTIONS.map(withOptions);
     case 'executive':
-      return [{ key: 'executiveSummary', enabled: true }];
+      return [withOptions({ key: 'executiveSummary', enabled: true })];
     case 'findings':
       return [
-        { key: 'assessmentFindings', enabled: true },
-        { key: 'detailedFindings', enabled: true },
+        withOptions({ key: 'assessmentFindings', enabled: true }),
+        withOptions({ key: 'detailedFindings', enabled: true }),
       ];
   }
 }
@@ -568,6 +609,21 @@ export const evidenceSchema = z.object({
    *  snippet elsewhere. */
   description: z.string(),
   contentType: evidenceTypeSchema,
+  /**
+   * The language of a code block or the interpreter of a script (`bash`,
+   * `python3`), or null. Only the two text-code types carry one — see
+   * `evidenceCarriesSubtype`.
+   *
+   * Serialized because it is not merely decorative: for a script it decides the
+   * extension the supporting-files ZIP entry gets (`evidenceFileExtension`), so it
+   * names a file handed to a client, and it prints as the report's language chip.
+   * A value the operator can neither see nor correct would mean a script filed
+   * under a typo'd interpreter is stuck being delivered as `.txt` with nothing on
+   * any screen explaining why. `optional` for the same reason as
+   * `originalFilename`: a client built against this schema should still parse a
+   * response from a server that predates the field.
+   */
+  contentSubtype: z.string().nullable().optional(),
   /** Original uploaded filename, when known (used to name files in the report ZIP). */
   originalFilename: z.string().nullable().optional(),
   occurredAt: isoDateSchema,
@@ -840,8 +896,9 @@ export type CreateTagInput = z.infer<typeof createTagInput>;
 
 /**
  * Metadata for a new piece of evidence. Sent as the JSON `notes` part of the
- * multipart upload; the binary blob (if any) is the `file` part. For codeblock/
- * event/none, `content` may be provided inline instead of a file.
+ * multipart upload; the binary blob (if any) is the `file` part. For the
+ * editable-text types (`EVIDENCE_TEXT_EDITABLE`), `content` may be provided
+ * inline instead of a file — both paths converge on the same content blob.
  */
 export const createEvidenceInput = z.object({
   /** Short label for the evidence (required). Shown as the heading everywhere. */
@@ -850,9 +907,15 @@ export const createEvidenceInput = z.object({
   contentType: evidenceTypeSchema,
   occurredAt: isoDateSchema.optional(),
   tagIds: z.array(z.number().int().positive()).default([]),
-  /** Inline text content for codeblock/event/none types. */
+  /** Inline text content for the editable-text types — note, event, code block,
+   *  script, HTTP (see `EVIDENCE_TEXT_EDITABLE`). Stored as a blob exactly like an
+   *  uploaded file, so one content endpoint serves either origin. */
   content: z.string().optional(),
-  /** Language hint for codeblock evidence. */
+  /** Language hint for a code block, or the interpreter for a script (`bash`,
+   *  `python3`). Free text; read by the report's language chip and by the extension
+   *  the supporting-files ZIP names the entry with (`evidenceFileExtension`), and
+   *  readable + editable afterwards (`evidenceSchema.contentSubtype`,
+   *  `updateEvidenceInput.contentSubtype`) because it names a client-facing file. */
   contentSubtype: z.string().optional(),
   /** Original filename of an uploaded file, when the client knows it (used to name
    *  files in the report's supporting-files ZIP). File uploads also capture it
@@ -902,11 +965,24 @@ export const updateEvidenceInput = z.object({
   tagIds: z.array(z.number().int().positive()).optional(),
   parentEvidenceUuid: uuidSchema.nullable().optional(),
   /**
-   * New text body for editable text evidence (note/event/codeblock/http). Stored
-   * as the content blob, replacing the previous one; empty string clears it. Only
-   * valid for text content types — the server rejects it for image/recording.
+   * New text body for editable text evidence — note, event, code block, script,
+   * HTTP (`EVIDENCE_TEXT_EDITABLE` is the list; `isEditableTextEvidence` is the
+   * check). Stored as the content blob, replacing the previous one; empty string
+   * clears it. Only valid for those types — the server rejects it for a
+   * screenshot or a terminal recording.
    */
   content: z.string().optional(),
+  /**
+   * New language / interpreter, or null to clear it. Only valid for the types that
+   * carry one (`evidenceCarriesSubtype`) — the server rejects it for anything else
+   * rather than storing a value nothing will ever read.
+   *
+   * Bounded here even though `createEvidenceInput.contentSubtype` is not: the
+   * create path is fed by capture clients, while this one is an operator typing
+   * into a text field, and the only thing the value is used for is a token of at
+   * most 8 characters.
+   */
+  contentSubtype: z.string().max(120).nullable().optional(),
   /** Hide (true) or re-include (false) this evidence in every report output. */
   excludeFromReport: z.boolean().optional(),
 });
@@ -1050,6 +1126,27 @@ export const FINDINGS_EXPORT_VERSION = 4;
  */
 export const FINDINGS_EXPORT_VERSION_WITHOUT_EXCLUSIONS = 3;
 
+/*
+ * A new *evidence type* deliberately gets no stamp of its own, even though a file
+ * carrying `script` evidence will not import on a pre-script server.
+ *
+ * The conditional stamp above exists for the opposite failure mode: an unknown
+ * *field*, which zod strips without a word, so the import succeeds while quietly
+ * losing the meaning of what it imported. An unknown *enum value* is already
+ * loud — `contentType` below is the closed `evidenceTypeSchema`, so an older
+ * server refuses the whole file at parse time with an error naming the field and
+ * the value. There is nothing silent left to make noisy.
+ *
+ * Nor could a bump make that refusal nicer on the servers a version stamp is
+ * actually for — the already-deployed ones. The findings-import route parses the
+ * envelope *before* it reads `schemaVersion` (`routes/web/report.ts`), so the zod
+ * error wins the race whatever number the file carries.
+ * `ENGAGEMENT_EXPORT_VERSION` gates its manifest first and so would surface a
+ * version message instead, but that only trades one hard refusal for another —
+ * not worth a second constant and a conditional in two writers. The fix for the
+ * message, if it is ever wanted, belongs in the importer, not in the version.
+ */
+
 /** One evidence item inside an export. `contentBase64` is present only when the
  *  export was requested with `includeEvidenceContent` (makes it portable across
  *  servers); otherwise evidence is referenced by uuid + metadata only. */
@@ -1058,6 +1155,8 @@ export const exportedEvidenceSchema = z.object({
   /** Evidence title (report v3+); defaults to empty for exports made before it existed. */
   title: z.string().default(''),
   description: z.string(),
+  /** Closed enum on purpose — see the note above `exportedEvidenceSchema` about
+   *  why a new evidence type needs no new export-version stamp. */
   contentType: evidenceTypeSchema,
   contentSubtype: z.string().nullable().optional(),
   originalFilename: z.string().nullable().optional(),
@@ -1380,6 +1479,8 @@ export const exportedEngagementEvidenceSchema = z.object({
   uuid: uuidSchema,
   title: z.string().default(''),
   description: z.string().default(''),
+  /** Closed enum, like the findings export's — see the note above
+   *  `exportedEvidenceSchema` for why a new evidence type gets no version bump. */
   contentType: evidenceTypeSchema,
   /**
    * Unbounded on purpose: `createEvidenceInput.contentSubtype` is free text, so a

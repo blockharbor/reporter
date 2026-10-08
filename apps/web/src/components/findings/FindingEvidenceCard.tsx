@@ -2,21 +2,12 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { Link } from 'react-router-dom';
 import type { DraggableAttributes, DraggableSyntheticListeners } from '@dnd-kit/core';
 import { Badge, Button, TagChip, Textarea } from '@reporter/ui';
-import { EVIDENCE_TYPE_LABELS, type FindingEvidence } from '@reporter/shared';
+import { EVIDENCE_TYPE_ICONS, EVIDENCE_TYPE_LABELS, type FindingEvidence } from '@reporter/shared';
 import { evidenceHeading, evidenceSnippet } from '../../lib/evidence-label.js';
 import { formatDateTime } from '../../lib/format.js';
 import { READ_ONLY_TITLE } from '../../lib/permissions.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
 import { EvidenceExclusionBadge } from '../evidence/ExcludedFromReportBadge.js';
-
-const TYPE_ICON: Record<string, string> = {
-  image: '🖼',
-  codeblock: '⌨',
-  'terminal-recording': '▸',
-  'http-request-cycle': '⇄',
-  event: '⚑',
-  none: '✎',
-};
 
 /** How long to wait after the last keystroke before autosaving a caption. */
 const CAPTION_DEBOUNCE_MS = 700;
@@ -174,7 +165,7 @@ function Thumb({ slug, ev }: { slug: string; ev: FindingEvidence }): ReactNode {
         <img src={evidenceThumbUrl(slug, ev.uuid)} alt="" className="h-full w-full object-cover" />
       ) : (
         <div className="flex h-full w-full items-center justify-center text-lg text-muted">
-          {TYPE_ICON[ev.contentType] ?? '•'}
+          {EVIDENCE_TYPE_ICONS[ev.contentType]}
         </div>
       )}
     </div>

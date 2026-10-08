@@ -8,6 +8,60 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ## [Unreleased]
 
+### Added
+
+- **A new `Script` evidence type for full, runnable scripts — distinct from the
+  short `Code block` snippet.** A script is captured by typing it into a monospace
+  editor or by uploading a file (decoded to UTF-8 and stored as editable text, so
+  either way it stays editable afterwards), with an optional interpreter (`bash`,
+  `python`, …) that names it in the report. Unlike a code block, a script renders
+  **verbatim** everywhere — the PDF, the in-app viewer, and the editor — never as
+  markdown, so a leading `#!/bin/bash` stays a shebang instead of becoming a
+  heading. It ships in the supporting-files ZIP with a sensible extension derived
+  from the interpreter (`.sh`, `.py`), and keeps its uploaded filename when it has
+  one.
+- **Four new Assessment Execution display controls (Reports → Configure).** Three
+  per-section toggles — **Evidence tags**, **Evidence type captions**, and **Script
+  contents** — and one top-level report option, **Number subsection titles**, which
+  prefixes the hand-authored subsection headings with `1.`, `2.`, `3.`… in the order
+  they already render (a labelling change only — nothing is reordered). All four
+  default to today's behaviour, so every existing engagement's report is byte-for-byte
+  unchanged. Turning **Script contents** off replaces each script's inline body with a
+  one-line pointer to its ZIP entry; the script is still delivered in the ZIP either
+  way.
+- **An evidence item's language / interpreter is now shown and editable.** The value
+  that names a script's file in the report ZIP (`.sh`, `.py`) and prints as the
+  report's language chip used to be write-once and invisible after capture; the
+  evidence Content card now displays it — with the extension it will produce — and
+  lets a writer correct it.
+
+### Changed
+
+- **A built-in report type now honours the per-section display choices.** Picking
+  "Full report", "Executive summary" or "Findings only" from **Report type**
+  previously reset every per-section sub-item to on, because a preset carries no
+  options of its own. A preset decides _which_ sections appear, not what each one
+  shows, so the engagement's sub-item choices are now carried across — most
+  importantly **Script contents**, where the old behaviour printed script bodies in
+  full for an author who had deliberately suppressed them. Engagements that had
+  switched an older sub-item (e.g. _Standards traceability_) off will now see that
+  choice respected by a preset report too.
+- Applying a report template warns when it would re-print script bodies the
+  engagement currently withholds, alongside the existing sanitize warning.
+
+### Fixed
+
+- An unrecognized script interpreter no longer becomes the file extension in the
+  report ZIP. Free text such as `pyton`, `Bourne Again Shell` or `C#` produced
+  `.pyton`, a truncated `.bourneag`, or the plausible-but-wrong `.c`; an interpreter
+  outside the known table now yields `.txt`, which is the only honest answer.
+- An engagement import now applies the same UTF-8 and size checks to `script`
+  evidence that the capture path does, instead of writing bytes the report would
+  later render as replacement characters into a client PDF.
+- An empty script upload is refused instead of being stored as a zero-length
+  supporting file, which put a blank entry (and the SHA-256 of nothing) in the
+  report's Files Attached table.
+
 ## [0.10.0] - 2026-10-07
 
 ### Added

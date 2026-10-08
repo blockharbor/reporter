@@ -11,6 +11,7 @@ import {
   configSummary,
   overflowReason,
   templateSanitizeWarning,
+  type SanitizeToggles,
 } from './report-templates.js';
 
 /** An engagement configuration, defaults filled in by the schema. */
@@ -24,48 +25,60 @@ function templateConfig(over: Partial<ReportTemplateConfig> = {}): ReportTemplat
 }
 
 describe('templateSanitizeWarning', () => {
-  const off = { showEvidenceTimestamps: false, showEvidenceOperators: false };
+  /**
+   * A configuration carrying only the choices this warning reads. `sections` is
+   * required because "Script contents" lives on the Assessment Execution entry's
+   * `options` map, and an empty list means the same as a list with no `options` on
+   * that entry: script bodies render (absent-means-on).
+   */
+  function toggles(
+    over: Partial<SanitizeToggles> & { scriptBodies?: boolean } = {},
+  ): SanitizeToggles {
+    const { scriptBodies, ...rest } = over;
+    return {
+      showEvidenceTimestamps: false,
+      showEvidenceOperators: false,
+      sections:
+        scriptBodies === undefined
+          ? []
+          : [{ key: 'assessmentExecution', enabled: true, options: { scriptBodies } }],
+      ...rest,
+    };
+  }
+  const off = toggles();
 
   it('stays silent when the template reveals nothing new', () => {
     expect(templateSanitizeWarning(off, off)).toBeNull();
     // Already on here, and the template leaves it on: no new disclosure.
     expect(
       templateSanitizeWarning(
-        { showEvidenceTimestamps: true, showEvidenceOperators: true },
-        { showEvidenceTimestamps: true, showEvidenceOperators: true },
+        toggles({ showEvidenceTimestamps: true, showEvidenceOperators: true }),
+        toggles({ showEvidenceTimestamps: true, showEvidenceOperators: true }),
       ),
     ).toBeNull();
     // A template that turns an option *off* is a tightening, not a leak.
-    expect(
-      templateSanitizeWarning({ showEvidenceTimestamps: true, showEvidenceOperators: false }, off),
-    ).toBeNull();
+    expect(templateSanitizeWarning(toggles({ showEvidenceTimestamps: true }), off)).toBeNull();
   });
 
   it('names timestamps when only timestamps would switch on', () => {
-    const msg = templateSanitizeWarning(off, {
-      showEvidenceTimestamps: true,
-      showEvidenceOperators: false,
-    });
+    const msg = templateSanitizeWarning(off, toggles({ showEvidenceTimestamps: true }));
     expect(msg).toContain('a sanitize option');
     expect(msg).toContain('evidence capture dates and times');
     expect(msg).not.toContain('operator');
   });
 
   it('names the operator when only the operator would switch on', () => {
-    const msg = templateSanitizeWarning(off, {
-      showEvidenceTimestamps: false,
-      showEvidenceOperators: true,
-    });
+    const msg = templateSanitizeWarning(off, toggles({ showEvidenceOperators: true }));
     expect(msg).toContain('a sanitize option');
     expect(msg).toContain('the operator who captured each evidence item');
     expect(msg).not.toContain('capture dates');
   });
 
   it('names both when both would switch on', () => {
-    const msg = templateSanitizeWarning(off, {
-      showEvidenceTimestamps: true,
-      showEvidenceOperators: true,
-    });
+    const msg = templateSanitizeWarning(
+      off,
+      toggles({ showEvidenceTimestamps: true, showEvidenceOperators: true }),
+    );
     expect(msg).toContain('both sanitize options');
     expect(msg).toContain('evidence capture dates and times');
     expect(msg).toContain('the operator who captured each evidence item');
@@ -73,11 +86,57 @@ describe('templateSanitizeWarning', () => {
 
   it('warns about the one option that is new when the other is already on', () => {
     const msg = templateSanitizeWarning(
-      { showEvidenceTimestamps: true, showEvidenceOperators: false },
-      { showEvidenceTimestamps: true, showEvidenceOperators: true },
+      toggles({ showEvidenceTimestamps: true }),
+      toggles({ showEvidenceTimestamps: true, showEvidenceOperators: true }),
     );
     expect(msg).toContain('a sanitize option');
     expect(msg).toContain('the operator who captured each evidence item');
+  });
+
+  /*
+   * Regression: applying a template replaces the Assessment Execution entry
+   * wholesale, so a template with script bodies on (which is every template saved
+   * before the sub-item existed — it has no `options` map at all) silently turns
+   * them back on for an engagement that suppressed them to keep a credential out of
+   * the deliverable. The warning is the only thing standing between that and a
+   * confirmed apply.
+   */
+  it('warns when the template would print suppressed script bodies again', () => {
+    const msg = templateSanitizeWarning(toggles({ scriptBodies: false }), toggles());
+    expect(msg).toContain('Script contents');
+    expect(msg).toContain('This template turns');
+    // Not a sanitize option, so it must not borrow that wording.
+    expect(msg).not.toContain('sanitize');
+  });
+
+  it('warns about script bodies alongside a sanitize option', () => {
+    const msg = templateSanitizeWarning(
+      toggles({ scriptBodies: false }),
+      toggles({ showEvidenceOperators: true, scriptBodies: true }),
+    );
+    expect(msg).toContain('the operator who captured each evidence item');
+    expect(msg).toContain('It also turns');
+    expect(msg).toContain('Script contents');
+  });
+
+  it('stays silent when the template suppresses script bodies too, or the engagement never did', () => {
+    // Both suppress: nothing new.
+    expect(
+      templateSanitizeWarning(toggles({ scriptBodies: false }), toggles({ scriptBodies: false })),
+    ).toBeNull();
+    // The engagement already prints them, so the template reveals nothing.
+    expect(templateSanitizeWarning(off, toggles({ scriptBodies: true }))).toBeNull();
+    // A template that starts suppressing them is a tightening.
+    expect(templateSanitizeWarning(off, toggles({ scriptBodies: false }))).toBeNull();
+  });
+
+  it('reads a real configuration pair, not just the hand-built shape', () => {
+    const suppressed = engagementConfig({
+      sections: [{ key: 'assessmentExecution', enabled: true, options: { scriptBodies: false } }],
+    });
+    // A template saved before the sub-item existed: default sections, no options.
+    expect(templateSanitizeWarning(suppressed, templateConfig())).toContain('Script contents');
+    expect(templateSanitizeWarning(engagementConfig(), templateConfig())).toBeNull();
   });
 });
 

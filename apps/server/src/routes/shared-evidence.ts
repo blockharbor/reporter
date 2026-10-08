@@ -58,6 +58,6 @@ export function evidenceContentMime(evidenceContentType: string, blob: Buffer): 
     return 'application/octet-stream';
   }
   if (evidenceContentType === 'http-request-cycle') return 'application/json; charset=utf-8';
-  // codeblock / terminal-recording / event / none are text.
+  // codeblock / script / terminal-recording / event / none are all text.
   return 'text/plain; charset=utf-8';
 }

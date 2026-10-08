@@ -52,6 +52,15 @@ function MediaBody({ evidence, slug }: { evidence: Evidence; slug: string }) {
       return <TerminalPlayer slug={slug} uuid={evidence.uuid} />;
     case 'codeblock':
       return <CodeblockViewer slug={slug} uuid={evidence.uuid} language={undefined} />;
+    case 'script':
+      // An edit can clear a script's body, which deletes the blob; answer that
+      // from the metadata rather than letting the fetch 404 and read as a load
+      // failure.
+      return evidence.hasContent ? (
+        <ScriptViewer slug={slug} uuid={evidence.uuid} />
+      ) : (
+        <EmptyScript />
+      );
     case 'http-request-cycle':
       return <HarViewer slug={slug} uuid={evidence.uuid} />;
     default:
@@ -174,6 +183,43 @@ function CodeblockViewer({ slug, uuid }: { slug: string; uuid: string; language?
   if (loading) return <Spinner />;
   if (error) return <p className="text-sm text-danger">Couldn't load the code block.</p>;
   return <MarkdownBody text={text} />;
+}
+
+/**
+ * A script body. Fetched like any other text blob, but rendered verbatim — never
+ * through markdown, which is the whole reason `script` exists as a separate type:
+ * a shell script's `#!/bin/bash` is a markdown H1, `*.conf` opens emphasis, and
+ * indented lines become code blocks inside code. The report PDF renders the same
+ * body verbatim in a `<pre>`, so this view matches the deliverable.
+ */
+function ScriptViewer({ slug, uuid }: { slug: string; uuid: string }) {
+  const { loading, text, error } = useTextContent(slug, uuid);
+  if (loading) return <Spinner />;
+  if (error) return <p className="text-sm text-danger">Couldn't load the script.</p>;
+  if (!text.trim()) return <EmptyScript />;
+  return <ScriptBody text={text} />;
+}
+
+/** A script with no body — cleared by an edit, or whitespace only. */
+function EmptyScript() {
+  return <p className="text-sm text-muted">This script is empty.</p>;
+}
+
+/**
+ * Verbatim monospace panel for a script body, shared with the evidence detail
+ * page's editable body card so the read-only render is identical in both places.
+ * No syntax highlighting: the design system ships no highlighter, and a wrong
+ * guess at the language is worse than plain text in a client-facing tool.
+ */
+export function ScriptBody({ text }: { text: string }) {
+  return (
+    // Height-capped and scrolled, like the HAR panel: a script may be up to
+    // `MAX_SCRIPT_BYTES`, and an uncapped <pre> would push the evidence's tags,
+    // comments and Report card thousands of pixels down the page.
+    <pre className="max-h-[50vh] min-w-0 overflow-auto rounded-card border border-border bg-surface-2 p-4 text-xs">
+      <code className="font-mono">{text}</code>
+    </pre>
+  );
 }
 
 /** Fetches and renders a note/event body blob. */

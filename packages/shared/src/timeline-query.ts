@@ -1,4 +1,4 @@
-import { EVIDENCE_TYPES, type EvidenceType } from './enums.js';
+import { isEvidenceType, type EvidenceType } from './enums.js';
 
 /**
  * A parsed evidence-timeline query. The same parser is used by the web query
@@ -37,7 +37,6 @@ export interface ParsedQuery {
 }
 
 const VALUE_KEYS = new Set(['tag', 'operator', 'type', 'range', 'uuid', 'sort', 'starred']);
-const EVIDENCE_TYPE_SET = new Set<string>(EVIDENCE_TYPES);
 
 interface RawToken {
   key: string | null;
@@ -136,7 +135,10 @@ export function parseQuery(input: string): ParsedQuery {
         if (value) result.operators.push(value);
         break;
       case 'type':
-        if (EVIDENCE_TYPE_SET.has(value)) result.types.push(value as EvidenceType);
+        // `isEvidenceType` narrows, so an unknown `type:` token is dropped rather
+        // than cast into the enum — a typo silently matches nothing instead of
+        // becoming a filter no evidence can satisfy.
+        if (isEvidenceType(value)) result.types.push(value);
         break;
       case 'uuid':
         if (value) result.uuids.push(value);

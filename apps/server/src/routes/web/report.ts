@@ -120,6 +120,8 @@ function reportOptionsFromQuery(q: Record<string, string | undefined>): ReportOp
     // (they don't read the engagement's saved report config).
     showEvidenceTimestamps: boolParam(q.showEvidenceTimestamps),
     showEvidenceOperators: boolParam(q.showEvidenceOperators),
+    // Same shape as the config path's `false` default: unnumbered unless asked.
+    numberExecutionSubsections: boolParam(q.numberExecutionSubsections),
   };
 }
 
@@ -145,6 +147,7 @@ function reportOptionsFromConfig(config: ReportTemplateConfig): ReportOptions {
     customSections: config.customSections,
     showEvidenceTimestamps: config.showEvidenceTimestamps,
     showEvidenceOperators: config.showEvidenceOperators,
+    numberExecutionSubsections: config.numberExecutionSubsections,
   };
 }
 
@@ -152,6 +155,11 @@ function reportOptionsFromConfig(config: ReportTemplateConfig): ReportOptions {
  * Resolve a report "type" into render options and the filename fragment that
  * names it. `custom` renders the engagement's saved configuration; the canned
  * presets render a fixed section subset (report-ready findings, no timeline).
+ *
+ * A preset fixes the section list, not what each section shows: the engagement's
+ * per-section sub-item choices ride along via `reportPresetSections`, next to the
+ * two sanitize flags, so no choice that withholds content from a deliverable can
+ * be undone just by picking a different report type.
  */
 function reportFor(
   config: ReportTemplateConfig,
@@ -165,10 +173,11 @@ function reportFor(
       evidenceGroup: config.evidenceGroup,
       findingGroup: config.findingGroup,
       includeTimeline: false,
-      sections: reportPresetSections(preset),
+      sections: reportPresetSections(preset, config.sections),
       customSections: [],
       showEvidenceTimestamps: config.showEvidenceTimestamps,
       showEvidenceOperators: config.showEvidenceOperators,
+      numberExecutionSubsections: config.numberExecutionSubsections,
     },
     label,
   };

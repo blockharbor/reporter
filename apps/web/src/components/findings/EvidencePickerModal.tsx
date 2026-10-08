@@ -12,6 +12,7 @@ import {
   useToast,
 } from '@reporter/ui';
 import {
+  EVIDENCE_TYPE_ICONS,
   EVIDENCE_TYPE_LABELS,
   parseQuery,
   stringifyQuery,
@@ -28,15 +29,6 @@ import { formatDateTime } from '../../lib/format.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
 import { userDisplayName } from '../../lib/user-display.js';
 import { EvidenceExclusionBadge } from '../evidence/ExcludedFromReportBadge.js';
-
-const TYPE_ICON: Record<string, string> = {
-  image: '🖼',
-  codeblock: '⌨',
-  'terminal-recording': '▸',
-  'http-request-cycle': '⇄',
-  event: '⚑',
-  none: '✎',
-};
 
 const EMPTY_QUERY = parseQuery('');
 
@@ -335,7 +327,7 @@ function PickerRow({
             />
           ) : (
             <div className="flex h-full w-full items-center justify-center text-sm text-muted">
-              {TYPE_ICON[ev.contentType] ?? '•'}
+              {EVIDENCE_TYPE_ICONS[ev.contentType]}
             </div>
           )}
         </div>

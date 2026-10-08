@@ -100,6 +100,7 @@ import {
   type RecommendationItem,
 } from '@reporter/shared';
 import { HttpError } from '../auth/guards.js';
+import { decodeScriptUpload } from './evidence.js';
 import { uniqueSlug } from '../helpers/slug.js';
 import { openZip, type ZipReader } from '../helpers/zip-read.js';
 
@@ -455,6 +456,36 @@ async function importFromArchive(
       }
 
       for (const slot of targets) {
+        /*
+         * Script bytes get the create path's two checks, because this is the one
+         * route into the `script` content type that does not run through
+         * `createEvidence`: rows go in with `createMany` and blobs are written right
+         * here. The report reads a script body back with `buf.toString('utf8')` and
+         * prints it verbatim, so an archive carrying non-UTF-8 or multi-megabyte
+         * script content would put a screenful of U+FFFD — or a megabyte of <pre> —
+         * into a client deliverable.
+         *
+         * Refusing the whole archive is the same call the content-hash check above
+         * makes, and for the same reason: an export written by this server cannot
+         * contain such a row (create refuses it), so one that does has been
+         * hand-built or corrupted, and importing it would just defer the damage to
+         * whoever generates the report.
+         */
+        if (slot.kind === 'evidence-full') {
+          const ev = data.evidence[slot.index]!;
+          if (ev.contentType === 'script') {
+            try {
+              decodeScriptUpload(bytes);
+            } catch (err) {
+              throw new HttpError(
+                400,
+                `Script evidence “${ev.title}” can't be imported. ${
+                  err instanceof HttpError ? err.message : 'Its content is not usable as a script.'
+                }`,
+              );
+            }
+          }
+        }
         const key =
           slot.kind === 'report-artifact'
             ? // Mirrors `recordGeneratedReport`'s `reports/` namespace, minus the

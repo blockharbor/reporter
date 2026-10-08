@@ -1,9 +1,20 @@
 import { z } from 'zod';
 
-/** The kinds of evidence reporter can store. Mirrors ASHIRT's content types. */
+/**
+ * The kinds of evidence reporter can store. Mirrors ASHIRT's content types, plus
+ * `script`.
+ *
+ * `Evidence.contentType` is a plain TEXT column, so adding a value here needs no
+ * migration — but it does need a value in every exhaustive map below, which is
+ * the point of their being exhaustive.
+ *
+ * Order is display order: it drives the evidence-type filter's checkbox list, so
+ * `script` sits next to `codeblock` — the two text-code types read as a pair.
+ */
 export const EVIDENCE_TYPES = [
   'image',
   'codeblock',
+  'script',
   'terminal-recording',
   'http-request-cycle',
   'event',
@@ -12,15 +23,267 @@ export const EVIDENCE_TYPES = [
 export const evidenceTypeSchema = z.enum(EVIDENCE_TYPES);
 export type EvidenceType = z.infer<typeof evidenceTypeSchema>;
 
-/** Human labels for evidence types (glossary-consistent). */
+/**
+ * Human labels for evidence types (glossary-consistent, Title Case, one noun).
+ *
+ * `script` is "Script", not "Script file" or "Shell script": it has to read as
+ * plainly distinct from "Code block" in a filter list and in a report caption,
+ * and the distinction users care about is what the thing *is* — a program that
+ * runs, rendered verbatim — not where it came from or which interpreter it wants
+ * (that is `contentSubtype`).
+ */
 export const EVIDENCE_TYPE_LABELS: Record<EvidenceType, string> = {
   image: 'Screenshot',
   codeblock: 'Code block',
+  script: 'Script',
   'terminal-recording': 'Terminal recording',
   'http-request-cycle': 'HTTP request',
   event: 'Event',
   none: 'Note',
 };
+
+/** Lookup set behind {@link isEvidenceType}; built once. */
+const EVIDENCE_TYPE_VALUES: ReadonlySet<string> = new Set(EVIDENCE_TYPES);
+
+/**
+ * Narrow a raw string to an `EvidenceType`. Every server-side read of
+ * `Evidence.contentType` starts as a `string` (the column is TEXT, with no enum
+ * or CHECK behind it), so this is the one place that decides whether such a value
+ * is a type we know — instead of casting `contentType as EvidenceType` and
+ * indexing a map that may not hold it.
+ */
+export function isEvidenceType(value: string): value is EvidenceType {
+  return EVIDENCE_TYPE_VALUES.has(value);
+}
+
+/**
+ * Glyph shown beside a piece of evidence in dense lists — timeline rows, the
+ * reparent picker, the finding evidence picker, finding evidence cards.
+ *
+ * Exhaustive `Record<EvidenceType, string>`, and that is the whole point: this
+ * map previously existed as four byte-identical `Record<string, string>` copies
+ * in the web app, each ending in `?? '•'`, so adding an evidence type compiled
+ * clean and then quietly rendered a bullet in four places. Keyed by the enum, a
+ * new type is a compile error here until it is given a glyph.
+ *
+ * Text symbols rather than emoji wherever one reads clearly at 1em. `❯` is the
+ * shell-prompt chevron: it says "this runs" without colliding with the filled
+ * play triangle that marks a recording.
+ */
+export const EVIDENCE_TYPE_ICONS: Record<EvidenceType, string> = {
+  image: '🖼',
+  codeblock: '⌨',
+  script: '❯',
+  'terminal-recording': '▸',
+  'http-request-cycle': '⇄',
+  event: '⚑',
+  none: '✎',
+};
+
+/**
+ * Whether a type's body is editable text — a UTF-8 blob the operator can edit in
+ * place — rather than opaque bytes (a screenshot, an asciicast).
+ *
+ * Exhaustive so a new type cannot be added without deciding this. The two
+ * hand-copied lists it replaces (the web evidence body and the server's
+ * update-evidence route) would otherwise have disagreed by default: the new type
+ * would render read-only on one surface while the other rejected `content`
+ * updates for it, with nothing failing to compile.
+ */
+export const EVIDENCE_TEXT_EDITABLE: Record<EvidenceType, boolean> = {
+  image: false,
+  codeblock: true,
+  // An uploaded script is decoded to UTF-8 at create time and stored exactly like
+  // typed content, so it stays editable afterwards however it arrived.
+  script: true,
+  'terminal-recording': false,
+  'http-request-cycle': true,
+  event: true,
+  none: true,
+};
+
+/** The editable-text types, in `EVIDENCE_TYPES` order. Derived, never hand-listed. */
+export const EDITABLE_TEXT_EVIDENCE_TYPES: readonly EvidenceType[] = EVIDENCE_TYPES.filter(
+  (t) => EVIDENCE_TEXT_EDITABLE[t],
+);
+
+/**
+ * {@link EVIDENCE_TEXT_EDITABLE} as a membership test over any string, because
+ * the server holds `Evidence.contentType` as a `string` straight from the
+ * database. An unrecognized type is not editable.
+ */
+export function isEditableTextEvidence(contentType: string): boolean {
+  return isEvidenceType(contentType) && EVIDENCE_TEXT_EDITABLE[contentType];
+}
+
+/**
+ * Default file extension (leading dot included) per evidence type, used to name
+ * the entry a piece of evidence gets in the report's supporting-files ZIP and in
+ * the "Files Attached" table. Exhaustive, so a new type cannot land with no
+ * extension and ship an extensionless file in a client deliverable.
+ *
+ * `image` is `''` rather than `'.png'`: screenshots are embedded in the PDF and
+ * excluded from the supporting-files sweep by query, so they are never named
+ * here, and the stored bytes may be PNG or JPEG — guessing would be a lie. The
+ * empty string reproduces the `?? ''` fallback this map replaces.
+ */
+export const EVIDENCE_TYPE_EXTENSIONS: Record<EvidenceType, string> = {
+  image: '',
+  codeblock: '.txt',
+  // Fallback only: a script that records its interpreter is named from it (see
+  // {@link evidenceFileExtension}). `.txt` rather than `.sh`, because an
+  // unspecified interpreter is unknown, not Bourne shell — handing a client a
+  // `.sh` that is really Python invites them to run it with the wrong one.
+  script: '.txt',
+  'terminal-recording': '.cast',
+  'http-request-cycle': '.har',
+  event: '.txt',
+  none: '.txt',
+};
+
+/**
+ * Interpreter / language token → conventional file extension, for naming a
+ * script in the supporting-files ZIP. `contentSubtype` holds whatever the
+ * operator typed (`bash`, `python3`, `PowerShell`), which makes a poor extension
+ * on its own: `.python` is not a thing.
+ *
+ * A token that is not in here gets no extension of its own — the script falls back
+ * to `.txt` — because the alternative is inventing one from free text, which is the
+ * defect this map exists to avoid (see {@link evidenceFileExtension}). Add an entry
+ * rather than relying on the token reading like an extension.
+ *
+ * Deliberately *not* applied to `codeblock`. That type has named its ZIP entries
+ * straight from the subtype since before this map existed, and archives already
+ * delivered to clients list those names in their "Files Attached" table; mapping
+ * them now would silently rename files across re-generated reports.
+ */
+export const SCRIPT_INTERPRETER_EXTENSIONS: Record<string, string> = {
+  sh: 'sh',
+  shell: 'sh',
+  bash: 'sh',
+  zsh: 'sh',
+  ksh: 'sh',
+  dash: 'sh',
+  ash: 'sh',
+  fish: 'fish',
+  python: 'py',
+  python2: 'py',
+  python3: 'py',
+  py: 'py',
+  ruby: 'rb',
+  rb: 'rb',
+  perl: 'pl',
+  pl: 'pl',
+  node: 'js',
+  nodejs: 'js',
+  javascript: 'js',
+  js: 'js',
+  typescript: 'ts',
+  ts: 'ts',
+  powershell: 'ps1',
+  pwsh: 'ps1',
+  ps1: 'ps1',
+  batch: 'bat',
+  bat: 'bat',
+  cmd: 'cmd',
+  php: 'php',
+  lua: 'lua',
+  awk: 'awk',
+  expect: 'exp',
+  tcl: 'tcl',
+  make: 'mk',
+  makefile: 'mk',
+};
+
+/**
+ * Whether this evidence type records a language / interpreter in `contentSubtype`.
+ *
+ * Only the two text-code types do: a code block's syntax language, and a script's
+ * interpreter. Everywhere else the column is either empty or holds something that
+ * is not a format hint, which is why the extension helper, the server's update
+ * guard and the create form all have to agree — a hand-written `=== 'codeblock' ||
+ * === 'script'` in three places is how they would come to disagree.
+ *
+ * Takes a `string` because the server reads `contentType` from a TEXT column.
+ */
+export function evidenceCarriesSubtype(contentType: string): boolean {
+  return contentType === 'script' || contentType === 'codeblock';
+}
+
+/** Reduce a free-text `contentSubtype` to a bare token (`Python 3` → `python3`). */
+function subtypeToken(contentSubtype: string | null | undefined): string {
+  return (contentSubtype ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * The file extension a piece of evidence gets in the report's supporting-files
+ * ZIP — including the leading dot, or `''` for none.
+ *
+ * Takes a `string` content type because the caller reads it from the database.
+ * For `script` and `codeblock` a recorded `contentSubtype` beats the per-type
+ * default, so a Python script lands as `.py`.
+ *
+ * The two differ in what happens to a token the map does not know:
+ *
+ * - `script` falls back to the per-type `.txt`. The Interpreter field is free text
+ *   ("names the file in the report" is all it promises), so `pyton`, `Bourne Again
+ *   Shell`, `nushell` and `C#` are all realistic input, and passing those through
+ *   produces exactly what this map exists to prevent — a made-up `.pyton`, a
+ *   truncated `.bourneag`, or worse, a *plausible but wrong* `.c` on a C# script.
+ *   The same reasoning already rules out defaulting an interpreter-less script to
+ *   `.sh`: handing a client a file named for the wrong interpreter invites them to
+ *   run it with the wrong one, and `.txt` says only what is true.
+ * - `codeblock` keeps its historical raw-token behaviour (`python` → `.python`),
+ *   warts and all, because archives already delivered to clients list those entry
+ *   names in their "Files Attached" table and mapping them now would rename files
+ *   across a re-generated report. Tokens are capped at 8 characters there, so a
+ *   junk subtype cannot grow the filename.
+ */
+export function evidenceFileExtension(contentType: string, contentSubtype?: string | null): string {
+  const fallback = isEvidenceType(contentType) ? EVIDENCE_TYPE_EXTENSIONS[contentType] : '';
+  if (!evidenceCarriesSubtype(contentType)) return fallback;
+  const token = subtypeToken(contentSubtype);
+  if (!token) return fallback;
+  if (contentType === 'script') {
+    const mapped = SCRIPT_INTERPRETER_EXTENSIONS[token];
+    return mapped ? '.' + mapped : fallback;
+  }
+  return '.' + token.slice(0, 8);
+}
+
+/**
+ * Size cap for script evidence, in bytes — far below the server's
+ * `MAX_UPLOAD_BYTES` on purpose. A script is decoded to UTF-8 at create time,
+ * held in memory to be edited, and rendered verbatim into the PDF; none of that
+ * suits a multi-megabyte blob, and 1 MiB is already orders of magnitude above any
+ * real tooling script.
+ *
+ * Shared so the upload form can refuse an oversized file before sending it and
+ * the server can refuse it on arrival, against the same number.
+ */
+export const MAX_SCRIPT_BYTES = 1024 * 1024;
+
+/**
+ * Why an uploaded file was refused as script evidence. Shared for the same reason
+ * as {@link LAST_ADMIN_REASON}: the server raises these as its 400 message and the
+ * UI shows them inline, so a second copy is how the two would come to describe
+ * the same refusal differently.
+ */
+export const SCRIPT_NOT_TEXT_REASON =
+  'That file isn’t UTF-8 text. A script is stored and edited as text — check you picked the source file, not a compiled binary or an archive.';
+export const SCRIPT_TOO_LARGE_REASON = `A script is limited to ${MAX_SCRIPT_BYTES / 1024 / 1024} MB of text. Trim it, or split it across separate evidence.`;
+/**
+ * Why an *empty* file was refused as script evidence.
+ *
+ * Refused rather than accepted as "a script with no body": the operator picked a
+ * file, so their intent was to file its contents, and storing nothing would leave
+ * a zero-length entry in the report ZIP with the SHA-256 of the empty string
+ * listed beside it in the Files Attached table — a file the client is told to look
+ * for and finds blank. Typed content left empty is a different gesture and still
+ * means "no body yet".
+ */
+export const SCRIPT_EMPTY_REASON =
+  'That file is empty. Pick the file with the script in it, or type the script into the field instead.';
 
 /** A user's role within a single engagement. */
 export const ENGAGEMENT_ROLES = ['admin', 'write', 'read'] as const;
@@ -364,6 +627,40 @@ export const REPORT_SECTION_ITEMS: Partial<Record<ReportSection, ReportSectionIt
   threatModel: [
     { key: 'narrative', label: 'Narrative', sample: 'The threat-model narrative prose.' },
     { key: 'diagrams', label: 'Diagrams', sample: 'Embedded threat-model diagram figures.' },
+  ],
+  assessmentExecution: [
+    /*
+     * Every item here names a piece of content that *renders*, never its
+     * suppression. The convention is fixed — a piece renders unless its section
+     * entry's `options[key]` is explicitly `false` — and no existing engagement
+     * has an `options` map for this section at all, so every key below is absent
+     * and reads as `true`. That is what keeps an already-configured report
+     * byte-identical to the one it produced before these toggles existed.
+     */
+    {
+      key: 'evidenceTags',
+      label: 'Evidence tags',
+      sample: 'Tag chips under each evidence item.',
+    },
+    {
+      key: 'typeCaptions',
+      label: 'Evidence type captions',
+      sample: 'The “Script” / “Screenshot” caption line under each embedded item.',
+    },
+    /*
+     * Polarity is load-bearing, hence "show the script bodies" rather than "hide
+     * scripts": a `hideScripts` key would be read by the same absent-means-true
+     * rule as *hiding enabled* for every configuration that predates it, which is
+     * exactly backwards. Turning this off never drops a script from the
+     * deliverable — it is still swept into `supporting-files/` and still listed
+     * in Files Attached; only the inline body is replaced, by a one-line stub
+     * naming that ZIP entry.
+     */
+    {
+      key: 'scriptBodies',
+      label: 'Script contents',
+      sample: 'Each script in full; off, a one-line pointer to the attached file.',
+    },
   ],
   detailedFindings: [
     { key: 'impact', label: 'Impact', sample: 'The impact statement on each weakness.' },

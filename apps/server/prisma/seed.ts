@@ -187,6 +187,41 @@ async function main() {
     },
   });
 
+  // A script (stored as a text blob, exactly like a codeblock or an uploaded
+  // text file). Distinct from the short `codeblock` snippet: it's a full,
+  // runnable artifact that renders verbatim in the report (never as markdown, so
+  // the `#!/bin/bash` shebang stays a shebang) and lands in the supporting-files
+  // ZIP as `.sh`.
+  //
+  // `originalFilename` is deliberately left unset: `synthesizeFilename` returns an
+  // uploaded name verbatim when it has one, so setting it here would mean the demo
+  // data never exercises the interpreter-derived extension at all. Without it the
+  // entry is named from the title plus the `bash` in `contentSubtype`, which is the
+  // path a typed script takes.
+  const scriptBody =
+    '#!/bin/bash\n' +
+    'set -euo pipefail\n' +
+    '# Enumerate sudo rights reachable from the current user, flagging any that\n' +
+    '# grant a shell or wildcard — the path that led to the root-shell finding.\n' +
+    'echo "[*] sudo -l for $(id -un):"\n' +
+    'sudo -n -l 2>/dev/null | tee /tmp/sudo-rights.txt\n' +
+    'echo "[*] Shell/wildcard entries:"\n' +
+    "grep -E '(ALL|NOPASSWD).*(sh|bash|/\\*)' /tmp/sudo-rights.txt || echo '  none'\n";
+  await db.evidence.create({
+    data: {
+      engagementId: eng.id,
+      operatorId: operator.id,
+      contentType: 'script',
+      contentSubtype: 'bash',
+      title: 'sudo rights enumeration',
+      description:
+        'Script run on web01 to enumerate reachable sudo rules during privilege escalation.',
+      fullBlobKey: await putBlob(Buffer.from(scriptBody, 'utf8')),
+      occurredAt: at(90),
+      tags: { create: [{ tagId: tagByName.get('priv-esc')!.id }] },
+    },
+  });
+
   // A screenshot (generated placeholder PNG + thumbnail).
   const png = await sharp({
     create: { width: 640, height: 360, channels: 3, background: { r: 14, g: 138, b: 138 } },

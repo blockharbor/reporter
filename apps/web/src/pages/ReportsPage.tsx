@@ -641,10 +641,12 @@ export function ReportsPage() {
                               }
                               extra={
                                 entry.key === 'assessmentExecution' ? (
-                                  <SanitizeControl
+                                  <ExecutionExtraControls
+                                    numberSubsections={config.numberExecutionSubsections}
                                     showTimestamps={config.showEvidenceTimestamps}
                                     showOperators={config.showEvidenceOperators}
                                     canEdit={canEdit}
+                                    enabled={entry.enabled}
                                     onChange={(patch) => setConfig((c) => ({ ...c, ...patch }))}
                                   />
                                 ) : undefined
@@ -1310,6 +1312,71 @@ function SortableSectionRow({
         />
       </label>
     </li>
+  );
+}
+
+/**
+ * Assessment-Execution-only controls shown at the bottom of that section's
+ * expanded panel, below its "Include in this section" sub-items. These are
+ * top-level report-config fields (not entries in this section's `options` map),
+ * so — unlike `evidenceTags` / `typeCaptions` / `scriptBodies`, which the generic
+ * sub-item loop renders on their own — they're threaded in here explicitly:
+ *   - a note that a script always ships in the ZIP regardless of the "Script
+ *     contents" sub-item above (which only governs the inline body);
+ *   - the subsection-title numbering toggle (`numberExecutionSubsections`);
+ *   - the Sanitize sub-panel (`showEvidenceTimestamps` / `showEvidenceOperators`).
+ */
+function ExecutionExtraControls({
+  numberSubsections,
+  showTimestamps,
+  showOperators,
+  canEdit,
+  enabled,
+  onChange,
+}: {
+  numberSubsections: boolean;
+  showTimestamps: boolean;
+  showOperators: boolean;
+  canEdit: boolean;
+  /** The section itself is enabled; its parts are editable only when it is. */
+  enabled: boolean;
+  onChange: (patch: Partial<ReportConfig>) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      {/* The "Script contents" sub-item above governs only the inline body. A
+          reader will otherwise assume turning it on is what puts scripts in the
+          ZIP, so say plainly that the download never depends on it — including the
+          part that catches people out, that the printed copy is the abridged one. */}
+      <p className="text-xs text-muted">
+        Scripts are always included in the report ZIP. “Script contents” only controls whether each
+        one also prints in the report body, where a very long script is cut off with a “truncated”
+        marker — so the ZIP copy is always the complete one.
+      </p>
+      <label className="flex cursor-pointer items-start gap-2">
+        <input
+          type="checkbox"
+          checked={numberSubsections}
+          onChange={(e) => onChange({ numberExecutionSubsections: e.target.checked })}
+          disabled={!canEdit || !enabled}
+          aria-label="Number subsection titles"
+          className="mt-0.5 h-4 w-4 rounded border-border text-accent accent-[var(--accent)] disabled:opacity-50"
+        />
+        <span className="min-w-0">
+          <span className="block text-sm text-text">Number subsection titles</span>
+          <span className="block text-xs text-muted">
+            Prefix each hand-authored subsection heading with “1.”, “2.”, “3.”… in the order it
+            already appears. A labelling change only — nothing is reordered.
+          </span>
+        </span>
+      </label>
+      <SanitizeControl
+        showTimestamps={showTimestamps}
+        showOperators={showOperators}
+        canEdit={canEdit}
+        onChange={onChange}
+      />
+    </div>
   );
 }
 

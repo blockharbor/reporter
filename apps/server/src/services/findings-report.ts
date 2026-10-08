@@ -20,14 +20,15 @@ import {
   REPORT_SECTION_LABELS,
   SEVERITY_LABELS,
   SEVERITY_RANK,
+  evidenceFileExtension,
   executionTimelineConfigSchema,
+  isEvidenceType,
   iso21434Ref,
   unr155Ref,
   tagColor,
   type Contact,
   type EngagementProgress,
   type EvidenceGrouping,
-  type EvidenceType,
   type ExecutionSubsection,
   type ExecutionTimelineConfig,
   type FindingGrouping,
@@ -170,6 +171,14 @@ export interface ReportOptions {
    * log's `who` label. Same default semantics as {@link showEvidenceTimestamps}.
    */
   showEvidenceOperators?: boolean;
+  /**
+   * Number the Assessment Execution subsection titles (1., 2., 3.) in the order
+   * they already render. A labelling change only — it reorders nothing and never
+   * numbers individual evidence items. Omitted means off, matching the config
+   * schema's `false` default, so an unconfigured report keeps the unnumbered
+   * headings it has always had. See {@link renderExecutionNarrative}.
+   */
+  numberExecutionSubsections?: boolean;
 }
 
 export interface JsonExportOptions extends ReportOptions {
@@ -397,6 +406,15 @@ export async function buildFindingsExport(
         uuid: e.uuid,
         title: e.title,
         description: e.description,
+        // The one place a `contentType` cast stands rather than being narrowed with
+        // `isEvidenceType` (see {@link evidenceTypeLabel}), because there is nothing
+        // to narrow *to*: the export schema's field is a closed enum, so an unknown
+        // value has no representable substitute, and neither available alternative
+        // is better than the cast. Re-labelling it (`'none'`) would silently
+        // mis-describe evidence in a file used as a backup, and throwing would fail
+        // a whole export over one row. The column can only hold a validated value
+        // anyway — every write path (`createEvidence`, both importers) parses it
+        // through `evidenceTypeSchema` first.
         contentType: e.contentType as (typeof evidence)[number]['contentType'],
         contentSubtype: e.contentSubtype,
         originalFilename: e.originalFilename,
@@ -540,53 +558,128 @@ type RenderableEvidence = Pick<
   'title' | 'description' | 'contentType' | 'contentSubtype' | 'fullBlobKey'
 >;
 
+/**
+ * The evidence-type label for a stored `contentType`, falling back to the raw
+ * column value for a type this build doesn't know. `contentType` is a plain TEXT
+ * column, so it is narrowed rather than cast: casting a string into the
+ * exhaustive label map would hand back `undefined` for an unknown value and
+ * silently print it, which is exactly how a newly added type goes unnoticed.
+ */
+function evidenceTypeLabel(contentType: string): string {
+  return isEvidenceType(contentType) ? EVIDENCE_TYPE_LABELS[contentType] : contentType;
+}
+
+/**
+ * How an embedded evidence body may render. These are the Assessment Execution
+ * section's display sub-items (`typeCaptions`, `scriptBodies` in
+ * `REPORT_SECTION_ITEMS`); every other render site — finding attack paths and
+ * attached evidence — renders with {@link FULL_EVIDENCE_DISPLAY}, because those
+ * belong to the Detailed Findings section and have toggles of their own.
+ */
+interface EvidenceDisplay {
+  /**
+   * Render the content-type caption ("Script", "Screenshot", …). This is only
+   * ever the *fallback* caption, used when the item has no title or description
+   * of its own — a caption the author actually wrote is never suppressed.
+   */
+  typeCaptions: boolean;
+  /** Render a script's contents inline; off, a one-line artifact stub replaces it. */
+  scriptBodies: boolean;
+  /**
+   * Blob key → `supporting-files/` entry name, from the one
+   * {@link gatherSupportingFiles} list the ZIP is also built from. Read only by
+   * the suppressed-script stub, so it can name the file the reader is being sent
+   * to instead of a second, independently derived name that could disagree.
+   */
+  artifactNames: ReadonlyMap<string, string>;
+}
+
+/** Everything on — the default outside the Assessment Execution section. */
+const FULL_EVIDENCE_DISPLAY: EvidenceDisplay = {
+  typeCaptions: true,
+  scriptBodies: true,
+  // Never consulted: the stub is only reachable with `scriptBodies: false`.
+  artifactNames: new Map(),
+};
+
 /** Render one piece of evidence to HTML, loading its blob if needed. */
 async function renderEvidence(
   app: FastifyInstance,
   e: RenderableEvidence,
   budget: Budget,
+  display: EvidenceDisplay = FULL_EVIDENCE_DISPLAY,
 ): Promise<string> {
-  const caption = esc(
-    e.title ||
-      e.description ||
-      EVIDENCE_TYPE_LABELS[e.contentType as EvidenceType] ||
-      e.contentType,
-  );
+  // The item's own words win; the content-type label is the fallback, and that
+  // fallback is what `typeCaptions: false` drops — so the caption line can come
+  // out empty here, and every branch below has to cope with having none.
+  const own = e.title || e.description;
+  const caption = esc(own || (display.typeCaptions ? evidenceTypeLabel(e.contentType) : ''));
+  const captionTag = caption ? `<figcaption>${caption}</figcaption>` : '';
+  /** The caption alone, for the branches that have no body to hang it under. */
+  const captionOnly = caption ? `<div class="ev"><p class="ev-note">${caption}</p></div>` : '';
 
   // Never read a terminal recording — casts can be large and can't render
   // statically in a PDF. Reference it instead of pulling the blob into memory.
   if (e.contentType === 'terminal-recording') {
-    return `<div class="ev"><p class="ev-note"><span class="play">▶</span> Terminal recording — view in reporter.</p><figcaption>${caption}</figcaption></div>`;
+    return `<div class="ev"><p class="ev-note"><span class="play">▶</span> Terminal recording — view in reporter.</p>${captionTag}</div>`;
+  }
+
+  // Scripts as artifacts only: the body is replaced by a one-line pointer rather
+  // than dropped, modelled on the terminal-recording line above. Silence is not
+  // an option here — the script is still swept into `supporting-files/` and still
+  // listed, with its SHA-256, in the Files Attached table, so omitting it would
+  // leave the reader a hash for a file the document never mentions (and a
+  // PDF-only download with no ZIP beside it would lose the script entirely).
+  // The blob is not read at all on this path.
+  if (e.contentType === 'script' && !display.scriptBodies) {
+    const entry = e.fullBlobKey ? display.artifactNames.get(e.fullBlobKey) : undefined;
+    // The marker reuses the stylesheet's single marker class (`.play`) with a
+    // shell prompt in place of the play triangle; the report CSS is not part of
+    // this feature, so no new class is introduced for it.
+    const where = entry
+      ? ` — provided as <span class="mono">supporting-files/${esc(entry)}</span> with this report.`
+      : ' — view in reporter.';
+    return `<div class="ev"><p class="ev-note"><span class="play">$</span> Script${where}</p>${captionTag}</div>`;
   }
 
   const buf = e.fullBlobKey ? await app.blobs.getBuffer(e.fullBlobKey).catch(() => null) : null;
 
   if (e.contentType === 'image') {
-    if (!buf) return `<div class="ev"><p class="ev-note">${caption}</p></div>`;
+    if (!buf) return captionOnly;
     if (buf.length > IMAGE_EMBED_CAP || buf.length > budget.remaining) {
       const mb = (buf.length / (1024 * 1024)).toFixed(1);
-      return `<div class="ev"><p class="ev-note">Screenshot (${mb} MB) — too large to embed; view in reporter.</p><figcaption>${caption}</figcaption></div>`;
+      return `<div class="ev"><p class="ev-note">Screenshot (${mb} MB) — too large to embed; view in reporter.</p>${captionTag}</div>`;
     }
     const mime = evidenceContentMime('image', buf);
     const b64 = buf.toString('base64');
     budget.remaining -= b64.length;
-    return `<figure class="ev"><img src="data:${mime};base64,${b64}" alt="${caption}" /><figcaption>${caption}</figcaption></figure>`;
+    // `alt` describes the image for a screen reader rather than printing on the
+    // page, so it keeps the type label even when the visible caption is off.
+    const alt = caption || esc(evidenceTypeLabel(e.contentType));
+    return `<figure class="ev"><img src="data:${mime};base64,${b64}" alt="${alt}" />${captionTag}</figure>`;
   }
   if (buf) {
     let text = buf.toString('utf8');
     if (text.length > 20000) text = text.slice(0, 20000) + '\n… (truncated)';
-    const lang = e.contentSubtype ? ` <span class="ev-lang">${esc(e.contentSubtype)}</span>` : '';
+    const lang = e.contentSubtype ? `<span class="ev-lang">${esc(e.contentSubtype)}</span>` : '';
+    // The language/interpreter chip is a property of the content, not the
+    // type-label caption, so it survives `typeCaptions: false` on its own line.
+    // Joined rather than concatenated, so a suppressed caption does not leave a
+    // `<figcaption>` that opens with a stray space.
+    const capText = [caption, lang].filter(Boolean).join(' ');
+    const capLine = capText ? `<figcaption>${capText}</figcaption>` : '';
     // Notes, events, and code blocks are authored as markdown (the Add-evidence
     // "Content" field is a markdown editor with a Preview tab), so render them the
-    // same way here — the PDF then matches that preview. HTTP (HAR JSON) and any
-    // other blob stays verbatim in a <pre>.
+    // same way here — the PDF then matches that preview. Scripts are deliberately
+    // NOT in this list: a shell script's `#!/bin/bash` is a shebang, not an `<h1>`.
+    // HTTP (HAR JSON) and any other blob stays verbatim in a <pre> too.
     if (e.contentType === 'none' || e.contentType === 'event' || e.contentType === 'codeblock') {
       const body = prose(text) || '<p class="ev-note">(No content.)</p>';
-      return `<div class="ev"><figcaption>${caption}${lang}</figcaption>${body}</div>`;
+      return `<div class="ev">${capLine}${body}</div>`;
     }
-    return `<div class="ev"><figcaption>${caption}${lang}</figcaption><pre class="ev-code">${esc(text)}</pre></div>`;
+    return `<div class="ev">${capLine}<pre class="ev-code">${esc(text)}</pre></div>`;
   }
-  return `<div class="ev"><p class="ev-note">${caption}</p></div>`;
+  return captionOnly;
 }
 
 /** Render one numbered Attack Path step: its caption (if any) then its evidence. */
@@ -759,10 +852,22 @@ interface TimelineEvidence {
   tags: { name: string; colorName: string }[];
 }
 
-/** Which per-evidence-item labels the evidence log shows (sanitize toggles). */
-interface EvidenceMetaVisibility {
+/**
+ * Everything the Assessment Execution render path may show for one evidence
+ * item: the two sanitize toggles, which are top-level report options, plus the
+ * section's own display sub-items ({@link EvidenceDisplay}, read off the
+ * section entry's `options` map). One object so the narrative and timeline
+ * subsection paths cannot be handed different answers.
+ */
+interface EvidenceMetaVisibility extends EvidenceDisplay {
   timestamps: boolean;
   operators: boolean;
+  /**
+   * Render the item's tag chips. Tags are only ever rendered *here*, in a
+   * timeline subsection — a narrative subsection embeds hand-picked figures and
+   * has never printed their tags — so this flag has no effect anywhere else.
+   */
+  tags: boolean;
 }
 
 /** Render a single timeline evidence item (when / who / desc / tags / body). */
@@ -772,16 +877,18 @@ async function renderTimelineItem(
   budget: Budget,
   show: EvidenceMetaVisibility,
 ): Promise<string> {
-  const tags = e.tags.length
-    ? `<div class="tl-tags">${e.tags.map((t) => tagChip(t.name, t.colorName)).join('')}</div>`
-    : '';
+  const tags =
+    show.tags && e.tags.length
+      ? `<div class="tl-tags">${e.tags.map((t) => tagChip(t.name, t.colorName)).join('')}</div>`
+      : '';
   const title = e.title.trim() ? `<p class="tl-title">${esc(e.title)}</p>` : '';
   const desc = e.description.trim() ? `<p class="tl-desc">${esc(e.description)}</p>` : '';
   const body = await renderEvidence(
     app,
     {
       // Title/description render as the item's heading + snippet above, so the
-      // embedded body caption falls back to the content-type label.
+      // embedded body caption falls back to the content-type label — which is
+      // precisely what `show.typeCaptions` gates.
       title: '',
       description: '',
       contentType: e.contentType,
@@ -789,6 +896,7 @@ async function renderTimelineItem(
       fullBlobKey: e.fullBlobKey,
     },
     budget,
+    show,
   );
   const whenTag = show.timestamps
     ? `<span class="tl-when">${shortDateTime(e.occurredAt)}</span>`
@@ -844,8 +952,7 @@ async function renderTimeline(
     order.sort((a, b) => (a === 'Untagged' ? 1 : b === 'Untagged' ? -1 : a.localeCompare(b)));
   } else {
     for (const e of items) {
-      const label = EVIDENCE_TYPE_LABELS[e.contentType as EvidenceType] ?? e.contentType;
-      push(label, e);
+      push(evidenceTypeLabel(e.contentType), e);
     }
     order.sort((a, b) => a.localeCompare(b));
   }
@@ -876,15 +983,6 @@ export interface SupportingFileMeta {
   blobKey: string;
 }
 
-/** Default file extension per evidence content type (screenshots are excluded). */
-const EXT_BY_TYPE: Record<string, string> = {
-  'terminal-recording': '.cast',
-  'http-request-cycle': '.har',
-  codeblock: '.txt',
-  event: '.txt',
-  none: '.txt',
-};
-
 function slugifyName(s: string): string {
   return s
     .toLowerCase()
@@ -906,11 +1004,12 @@ function synthesizeFilename(e: {
     return e.originalFilename.split(/[\\/]/).pop()!.trim().slice(0, 120) || e.uuid;
   }
   const base = slugifyName(e.title) || slugifyName(e.description) || e.contentType || 'evidence';
-  let ext = EXT_BY_TYPE[e.contentType] ?? '';
-  if (e.contentType === 'codeblock' && e.contentSubtype) {
-    const lang = e.contentSubtype.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (lang) ext = '.' + lang.slice(0, 8);
-  }
+  // Per-type default, overridden by the recorded language/interpreter where that
+  // makes sense — so a script filed as Python lands as `.py` and the client can
+  // run it with the right thing. The whole rule (including the historical
+  // raw-token behaviour for a codeblock, which keeps names in already-delivered
+  // archives stable) lives in `@reporter/shared`, next to the type list itself.
+  const ext = evidenceFileExtension(e.contentType, e.contentSubtype);
   return `${base}-${e.uuid.slice(0, 8)}${ext}`;
 }
 
@@ -1296,6 +1395,22 @@ async function gatherSubsectionTimeline(
  * Assessment Execution subsections. A `narrative` subsection renders its titled
  * prose + hand-embedded evidence; a `timeline` subsection renders a filtered,
  * grouped view of the engagement's captured evidence (see `ExecutionTimelineConfig`).
+ *
+ * `number` prefixes each subsection's hand-authored title with its 1-based
+ * position ("1. Infotainment head unit"). The prefix is built once, above the
+ * per-kind branch, because both kinds emit the same `<h3 class="block-h">` and
+ * the counter has to run across them in document order — numbering them
+ * separately would restart or interleave the sequence. Nothing else in the
+ * document numbers a heading's *text* (section numbers live in their own
+ * `.sec-num` span, findings in `W1`/`S1`/`R1` cells, attack-path steps in a
+ * `.step-label`), so "1." cannot collide with an existing scheme.
+ *
+ * It is done inline rather than with a CSS counter: `h3.block-h` is shared with
+ * a dozen generated headings (Service Scope, Summary of Weaknesses, Files
+ * Attached, the Evidence Log header inside this very section), so a counter
+ * would need a new class in `report-style.ts` to tell the hand-authored titles
+ * apart — and inline numbers are already the house pattern for every other
+ * identifier in this document.
  */
 async function renderExecutionNarrative(
   app: FastifyInstance,
@@ -1305,10 +1420,16 @@ async function renderExecutionNarrative(
   evidenceByUuid: Map<string, GatheredEvidence>,
   budget: Budget,
   show: EvidenceMetaVisibility,
+  number: boolean,
 ): Promise<string> {
   const parts: string[] = [];
+  // Counted over the subsections that actually render — a blank title is skipped
+  // below — so the printed sequence has no gaps.
+  let n = 0;
   for (const sub of subsections) {
     if (!sub.title.trim()) continue;
+    n++;
+    const heading = `<h3 class="block-h">${number ? `${n}. ` : ''}${esc(sub.title)}</h3>`;
 
     if (sub.kind === 'timeline') {
       const cfg = executionTimelineConfigSchema.parse(sub.timeline ?? {});
@@ -1317,7 +1438,7 @@ async function renderExecutionNarrative(
         items.length === 0
           ? '<p class="pp muted">No evidence matches this timeline’s filters.</p>'
           : await renderTimeline(app, items, cfg.group, budget, show);
-      parts.push(`<h3 class="block-h">${esc(sub.title)}</h3>${body}`);
+      parts.push(`${heading}${body}`);
       continue;
     }
 
@@ -1331,11 +1452,13 @@ async function renderExecutionNarrative(
       // goes with it, so nothing hints at the omission.
       if (!ev) continue;
       const cap = ref.caption?.trim() ? `<p class="step-caption">${esc(ref.caption)}</p>` : '';
-      const evHtml = await renderEvidence(app, ev, budget);
+      // Embedded narrative figures take the section's display sub-items too, so a
+      // script hand-placed in the prose obeys the same toggle as one in a timeline.
+      const evHtml = await renderEvidence(app, ev, budget, show);
       evParts.push(`<div class="step">${cap}${evHtml}</div>`);
     }
     const evHtml = evParts.length ? `<div class="path">${evParts.join('\n')}</div>` : '';
-    parts.push(`<h3 class="block-h">${esc(sub.title)}</h3>${body}${evHtml}`);
+    parts.push(`${heading}${body}${evHtml}`);
   }
   return parts.join('\n');
 }
@@ -1364,7 +1487,11 @@ export async function buildReportHtml(
   // evidence-log timestamp/operator, so no route can leak capture times or
   // operator identities by omission. Config routes pass the saved values (schema
   // default: hidden); the legacy query routes accept explicit opt-in params.
-  const showEvidenceMeta: EvidenceMetaVisibility = {
+  //
+  // The rest of {@link EvidenceMetaVisibility} is the Assessment Execution
+  // section's own display sub-items, which live on that section's entry rather
+  // than in `opts`, so the full object is assembled in the section's case below.
+  const sanitize: Pick<EvidenceMetaVisibility, 'timestamps' | 'operators'> = {
     timestamps: opts.showEvidenceTimestamps ?? false,
     operators: opts.showEvidenceOperators ?? false,
   };
@@ -1445,6 +1572,11 @@ export async function buildReportHtml(
 
   // Supporting files (non-screenshot evidence) for the ZIP + Files Attached table.
   const supportingFiles = precomputedFiles ?? (await gatherSupportingFiles(app, eng));
+  // Blob key → the entry name the ZIP will use, taken from that same list (so it
+  // carries the collision suffix `gatherSupportingFiles` assigned). The only
+  // reader is the suppressed-script stub, which has to point at a name that
+  // really exists in the bundle and in the Files Attached table.
+  const artifactNames = new Map(supportingFiles.map((f) => [f.blobKey, f.filename]));
 
   // Which optional sections have content to render.
   const hasThreatModel =
@@ -1781,6 +1913,18 @@ export async function buildReportHtml(
       case 'assessmentExecution': {
         const present = (renderNarrative && hasNarrativeContent) || includeTimeline;
         if (!present) break;
+        // The section's display sub-items, on top of the two top-level sanitize
+        // toggles. Each one is absent-means-on via `partOn`, so an engagement that
+        // has no `options` map for this section (every engagement that predates
+        // these toggles, and every legacy query-param caller) renders exactly what
+        // it rendered before.
+        const showEvidenceMeta: EvidenceMetaVisibility = {
+          ...sanitize,
+          tags: partOn('evidenceTags'),
+          typeCaptions: partOn('typeCaptions'),
+          scriptBodies: partOn('scriptBodies'),
+          artifactNames,
+        };
         let narrativeHtml = '';
         if (renderNarrative && hasNarrativeContent) {
           const refUuids = [
@@ -1833,6 +1977,7 @@ export async function buildReportHtml(
             evidenceByUuid,
             budget,
             showEvidenceMeta,
+            opts.numberExecutionSubsections === true,
           );
         }
 

@@ -17,53 +17,112 @@ import { customSectionKey } from './report-sections.js';
  * the part that can destroy an author's work if it is wrong — are unit-testable.
  */
 
-/** The two sanitize toggles — the only part of a configuration that can leak. */
+/**
+ * The parts of a configuration that decide whether a deliverable carries content
+ * the author may have chosen to withhold: the two top-level sanitize toggles, and
+ * `sections`, which holds the Assessment Execution display sub-items.
+ *
+ * `sections` is here rather than read from a whole `ReportTemplateConfig` so the
+ * one comparison that matters stays obvious — and so a new withholding control is
+ * a change to {@link disclosuresOf} rather than to four call sites.
+ */
 export type SanitizeToggles = Pick<
   ReportTemplateConfig,
-  'showEvidenceTimestamps' | 'showEvidenceOperators'
+  'showEvidenceTimestamps' | 'showEvidenceOperators' | 'sections'
 >;
 
+/** Whether a configuration *shows* each withholdable piece. */
+interface Disclosures {
+  timestamps: boolean;
+  operators: boolean;
+  scriptBodies: boolean;
+}
+
 /**
- * One specific sentence naming what `next` would reveal that `current` hides, or
- * null when it reveals nothing new.
+ * Read a configuration as "what does this show?".
  *
- * `showEvidenceTimestamps` and `showEvidenceOperators` decide whether evidence
- * capture times and operator identities appear in a client deliverable; both
- * default to off deliberately. A template carries them like any other option, so
+ * `scriptBodies` lives on the Assessment Execution section entry's `options` map
+ * and follows the renderer's absent-means-on rule, so a configuration that has
+ * never been near these toggles — every template saved before they existed —
+ * correctly reads as showing script bodies.
+ */
+function disclosuresOf(c: SanitizeToggles): Disclosures {
+  const execution = c.sections.find((s) => s.key === 'assessmentExecution');
+  return {
+    timestamps: c.showEvidenceTimestamps,
+    operators: c.showEvidenceOperators,
+    scriptBodies: execution?.options?.scriptBodies !== false,
+  };
+}
+
+/**
+ * The sentences naming what `next` would reveal that `current` withholds, or null
+ * when it reveals nothing new.
+ *
+ * Three choices keep content out of a client deliverable, and all three default to
+ * withholding: `showEvidenceTimestamps` and `showEvidenceOperators` (evidence
+ * capture times and operator identities), and Assessment Execution's "Script
+ * contents" sub-item (a script's full body, which can carry a hardcoded credential
+ * — the body is the one thing in a report an author suppresses to redact rather
+ * than to shorten). A template carries all three like any other option, so
  * applying one — or generating a single report from one — can switch them on
- * without the author having touched the Sanitize control. That is a leak risk, not
- * a formatting change, so every caller renders this as its own line rather than
- * folding it into generic confirm copy.
+ * without the author having touched the control that set them. That is a leak
+ * risk, not a formatting change, so every caller renders this as its own line
+ * rather than folding it into generic confirm copy.
  *
  * The comparison is against `current` rather than against "off", so a template that
  * matches what this engagement already shows warns about nothing — there is no new
  * disclosure to warn about, and a warning that fires on every report would stop
- * being read by the time one mattered. A template that turns an option on is still
- * labelled unconditionally by the sanitize badge next to its name.
+ * being read by the time one mattered. A template that turns a sanitize option on
+ * is still labelled unconditionally by the sanitize badge next to its name.
+ *
+ * The other two Assessment Execution sub-items (evidence tags, type captions) are
+ * deliberately not here: they change how an item is labelled, not whether its
+ * content reaches the reader, and a warning that fires on formatting would be the
+ * noise that stops the real one being read.
  */
 export function templateSanitizeWarning(
   current: SanitizeToggles,
   next: SanitizeToggles,
 ): string | null {
-  const timestamps = next.showEvidenceTimestamps && !current.showEvidenceTimestamps;
-  const operators = next.showEvidenceOperators && !current.showEvidenceOperators;
-  if (!timestamps && !operators) return null;
-  const reveals =
-    timestamps && operators
-      ? 'evidence capture dates and times, and the operator who captured each evidence item,'
-      : timestamps
-        ? 'evidence capture dates and times'
-        : 'the operator who captured each evidence item';
-  return `This template turns ${
-    timestamps && operators ? 'both sanitize options' : 'a sanitize option'
-  } on: ${reveals} will appear in the report. They are off by default so a client deliverable carries neither.`;
+  const was = disclosuresOf(current);
+  const now = disclosuresOf(next);
+  const timestamps = now.timestamps && !was.timestamps;
+  const operators = now.operators && !was.operators;
+  const scriptBodies = now.scriptBodies && !was.scriptBodies;
+  if (!timestamps && !operators && !scriptBodies) return null;
+
+  const lines: string[] = [];
+  if (timestamps || operators) {
+    const reveals =
+      timestamps && operators
+        ? 'evidence capture dates and times, and the operator who captured each evidence item,'
+        : timestamps
+          ? 'evidence capture dates and times'
+          : 'the operator who captured each evidence item';
+    lines.push(
+      `This template turns ${
+        timestamps && operators ? 'both sanitize options' : 'a sanitize option'
+      } on: ${reveals} will appear in the report. They are off by default so a client deliverable carries neither.`,
+    );
+  }
+  if (scriptBodies) {
+    lines.push(
+      `${lines.length ? 'It also turns' : 'This template turns'} “Script contents” back on: every script’s full body prints in the report, where this engagement currently replaces it with a one-line pointer to the file in the ZIP.`,
+    );
+  }
+  return lines.join(' ');
 }
 
 /**
  * The engagement's live configuration with `config` applied.
  *
  * - The template's section selection and order win wholesale — that *is* the
- *   configuration being reproduced.
+ *   configuration being reproduced. That includes each section's display sub-items,
+ *   so a template can switch a withholding one back on; {@link templateSanitizeWarning}
+ *   is what names that before the author confirms, rather than this function
+ *   quietly keeping the engagement's choice and producing a configuration the
+ *   template does not describe.
  * - Custom sections are MERGED, not replaced: the template's version wins on an id
  *   collision, and the engagement's own are kept in their existing order, because
  *   silently dropping authored prose that happened not to be in the template would

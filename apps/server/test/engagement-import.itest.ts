@@ -9,6 +9,7 @@ import {
   ENGAGEMENT_EXPORT_BLOB_PREFIX,
   ENGAGEMENT_EXPORT_DATA_ENTRY,
   ENGAGEMENT_EXPORT_MANIFEST_ENTRY,
+  SCRIPT_NOT_TEXT_REASON,
   slugSchema,
   type EngagementImportResult,
   type ExecutionSubsection,
@@ -915,5 +916,75 @@ describe('full engagement import', () => {
     const copy = await loadCopy(res.json<EngagementImportResult>().engagement.slug);
     expect(copy.evidence[0]!.contentSubtype).toBe(subtype);
     expect(copy.findings[0]!.category!.category).toBe(categoryName);
+  });
+});
+
+/*
+ * An engagement import is the one way script bytes reach the `script` content type
+ * without passing through `createEvidence`: rows go in with `createMany` and blobs
+ * are written directly. The report reads a script body back with
+ * `buf.toString('utf8')` and prints it verbatim, so an archive carrying non-UTF-8
+ * script content would put a screenful of U+FFFD into a client PDF. A legitimate
+ * export cannot contain one — create refuses it — so the archive is refused with
+ * the same finality as a failed content-hash check.
+ */
+describe('script evidence in an archive is validated, not trusted', () => {
+  it('refuses an archive whose script content is not UTF-8 text', async () => {
+    await seedEngagement();
+    const cookie = await loginCookie(app, 'admin@test.local', 'password123');
+    const archive = await exportArchive(cookie);
+    const blobsBefore = await blobFiles();
+
+    // Re-label the screenshot as a script. Its blob is a PNG, whose first byte
+    // (0x89) is an invalid UTF-8 lead — and the content hash still matches, so this
+    // gets past the integrity check and lands squarely on the script decode.
+    const mislabelled = await rewriteZip(archive, (files, names) => {
+      const data = JSON.parse(files.get(ENGAGEMENT_EXPORT_DATA_ENTRY)!.toString('utf8'));
+      const ev = data.evidence.find((e: { contentType: string }) => e.contentType === 'image');
+      ev.contentType = 'script';
+      ev.contentSubtype = 'bash';
+      files.set(ENGAGEMENT_EXPORT_DATA_ENTRY, Buffer.from(JSON.stringify(data)));
+      return names;
+    });
+
+    const res = await importArchive(cookie, mislabelled);
+    expect(res.statusCode).toBe(400);
+    // Names the evidence, then quotes the shared reason the create path uses.
+    expect(res.json().error).toMatch(/Script evidence “Screenshot” can't be imported\./);
+    expect(res.json().error).toContain(SCRIPT_NOT_TEXT_REASON);
+    // Refused before the transaction, and the compensating delete left no orphans.
+    expect(await app.db.engagement.count()).toBe(1);
+    expect(await blobFiles()).toEqual(blobsBefore);
+  });
+
+  it('imports a well-formed script, and it stays editable afterwards', async () => {
+    const { users, eng } = await seedEngagement();
+    const scriptKey = 'engimport/script';
+    const body = Buffer.from('#!/bin/bash\nset -euo pipefail\necho ok\n');
+    await app.blobs.put(scriptKey, body);
+    await app.db.evidence.create({
+      data: {
+        engagementId: eng.id,
+        operatorId: users.writer.id,
+        contentType: 'script',
+        contentSubtype: 'bash',
+        title: 'Deploy script',
+        description: '',
+        occurredAt: new Date('2026-01-01T13:00:00Z'),
+        fullBlobKey: scriptKey,
+        sha256: sha(body),
+        sizeBytes: body.length,
+      },
+    });
+
+    const cookie = await loginCookie(app, 'admin@test.local', 'password123');
+    const res = await importArchive(cookie, await exportArchive(cookie));
+    expect(res.statusCode).toBe(200);
+
+    const imported = await app.db.evidence.findFirstOrThrow({
+      where: { contentType: 'script', engagement: { slug: res.json().slug } },
+    });
+    expect(imported.contentSubtype).toBe('bash');
+    expect(await app.blobs.getBuffer(imported.fullBlobKey!)).toEqual(body);
   });
 });

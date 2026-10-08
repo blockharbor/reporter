@@ -1,27 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Badge,
-  Button,
-  EmptyState,
-  ErrorState,
-  Input,
-  Modal,
-  Spinner,
-} from '@reporter/ui';
-import { EVIDENCE_TYPE_LABELS, type Evidence } from '@reporter/shared';
+import { Badge, Button, EmptyState, ErrorState, Input, Modal, Spinner } from '@reporter/ui';
+import { EVIDENCE_TYPE_ICONS, EVIDENCE_TYPE_LABELS, type Evidence } from '@reporter/shared';
 import { useTimeline } from '../../api/hooks.js';
 import { evidenceHeading, evidenceSnippet } from '../../lib/evidence-label.js';
 import { formatDateTime } from '../../lib/format.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
-
-const TYPE_ICON: Record<string, string> = {
-  image: '🖼',
-  codeblock: '⌨',
-  'terminal-recording': '▸',
-  'http-request-cycle': '⇄',
-  event: '⚑',
-  none: '✎',
-};
 
 /**
  * Pick a single top-level piece of evidence to (re)parent the current evidence
@@ -74,18 +57,14 @@ export function ReparentEvidenceModal({
   // Top-level evidence only, never the current item. Comments can't host comments.
   const topLevel = useMemo(
     () =>
-      (data?.items ?? []).filter(
-        (e) => e.parentEvidenceUuid === null && e.uuid !== currentUuid,
-      ),
+      (data?.items ?? []).filter((e) => e.parentEvidenceUuid === null && e.uuid !== currentUuid),
     [data, currentUuid],
   );
 
   const term = search.trim().toLowerCase();
   const candidates = useMemo(
     () =>
-      term
-        ? topLevel.filter((e) => evidenceHeading(e).toLowerCase().includes(term))
-        : topLevel,
+      term ? topLevel.filter((e) => evidenceHeading(e).toLowerCase().includes(term)) : topLevel,
     [topLevel, term],
   );
 
@@ -231,7 +210,7 @@ function PickerRow({
             />
           ) : (
             <div className="flex h-full w-full items-center justify-center text-sm text-muted">
-              {TYPE_ICON[ev.contentType] ?? '•'}
+              {EVIDENCE_TYPE_ICONS[ev.contentType]}
             </div>
           )}
         </div>
