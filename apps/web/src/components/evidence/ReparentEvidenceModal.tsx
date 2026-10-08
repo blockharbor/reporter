@@ -5,6 +5,7 @@ import { useTimeline } from '../../api/hooks.js';
 import { evidenceHeading, evidenceSnippet } from '../../lib/evidence-label.js';
 import { formatDateTime } from '../../lib/format.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
+import { GoalCountBadge } from './GoalCountBadge.js';
 
 /**
  * Pick a single top-level piece of evidence to (re)parent the current evidence
@@ -220,6 +221,7 @@ function PickerRow({
           <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
             <Badge tone="neutral">{EVIDENCE_TYPE_LABELS[ev.contentType]}</Badge>
             <span>{formatDateTime(ev.occurredAt)}</span>
+            <GoalCountBadge evidence={ev} />
           </div>
         </div>
       </button>

@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { DraggableAttributes, DraggableSyntheticListeners } from '@dnd-kit/core';
-import { Badge, Button, TagChip, Textarea } from '@reporter/ui';
+import { Badge, Button, MarkdownField, TagChip } from '@reporter/ui';
 import { EVIDENCE_TYPE_ICONS, EVIDENCE_TYPE_LABELS, type FindingEvidence } from '@reporter/shared';
 import { evidenceHeading, evidenceSnippet } from '../../lib/evidence-label.js';
 import { formatDateTime } from '../../lib/format.js';
 import { READ_ONLY_TITLE } from '../../lib/permissions.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
 import { EvidenceExclusionBadge } from '../evidence/ExcludedFromReportBadge.js';
+import { GoalCountBadge } from '../evidence/GoalCountBadge.js';
 
 /** How long to wait after the last keystroke before autosaving a caption. */
 const CAPTION_DEBOUNCE_MS = 700;
@@ -103,6 +104,7 @@ export function FindingEvidenceCard({
                 just as absent from the report, and nothing else on this row says so. */}
             <EvidenceExclusionBadge evidence={ev} />
             <span>{formatDateTime(ev.occurredAt)}</span>
+            <GoalCountBadge evidence={ev} />
             {ev.tags.slice(0, 3).map((t) => (
               <TagChip key={t.id} name={t.name} colorName={t.colorName} />
             ))}
@@ -214,17 +216,22 @@ function CaptionEditor({
     commit(draft);
   };
 
+  // The report renders the caption as markdown, so the editor has to offer the
+  // Write/Preview toggle rather than let an author discover the formatting in
+  // the delivered PDF. The margin lives on a wrapper — `className` on
+  // MarkdownField lands on the inner textarea, not the bordered shell.
   return (
-    <Textarea
-      rows={2}
-      value={draft}
-      onChange={(e) => onChange(e.target.value)}
-      onBlur={onBlur}
-      disabled={disabled}
-      title={disabled ? READ_ONLY_TITLE : undefined}
-      placeholder="Describe this step of the attack…"
-      aria-label="Attack-path step caption"
-      className="mt-3 text-sm"
-    />
+    <div className="mt-3">
+      <MarkdownField
+        rows={2}
+        value={draft}
+        onChange={onChange}
+        onBlur={onBlur}
+        disabled={disabled}
+        title={disabled ? READ_ONLY_TITLE : undefined}
+        placeholder="Describe this step of the attack…"
+        aria-label="Attack-path step caption"
+      />
+    </div>
   );
 }

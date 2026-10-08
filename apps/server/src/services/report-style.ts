@@ -180,6 +180,33 @@ p, li { text-wrap: pretty; }
   vertical-align: top; }
 .md th { background: var(--bh-light-gray); font-weight: 700; color: var(--bh-black); }
 
+/* Markdown rendered *inside* another text block — a summary-table cell, a
+   timeline description, a figure or step caption, a scope paragraph. The rules
+   above are the document's body prose (14.5px, --fg-1); these hosts set their own
+   size and colour (13.5px table text, 13px muted timeline copy, 12.5px captions),
+   so the nested markdown inherits the host's instead of jumping back up to body
+   size. Margins already come from the :first-child / :last-child resets above,
+   and a code span is sized relative to its host rather than pinned at 12.5px.
+
+   white-space: normal undoes a host's pre-wrap: the renderer sets breaks: true,
+   so it emits a <br> for a single newline itself and pre-wrap would print every
+   line break twice. .tl-desc and .step-caption dropped their pre-wrap outright
+   (every one of their users renders markdown now); .pp keeps it, because most of
+   its users are still verbatim text. */
+.pp > .md, table.tbl td > .md, .tl-desc > .md, figcaption > .md, .ev-note > .md,
+.step-caption > .md {
+  font-size: inherit; line-height: inherit; color: inherit; white-space: normal; }
+.pp > .md code, table.tbl td > .md code, .tl-desc > .md code, figcaption > .md code,
+.ev-note > .md code, .step-caption > .md code { font-size: 0.92em; }
+/* A caption is one short line in practice, and the language chip sits after it on
+   that line, so a single-paragraph caption flows inline and the chip stays put. A
+   caption that really is multi-block (a list, a fenced block) still breaks — only
+   p is made inline, so ul / ol / pre keep their own display. A *second* paragraph
+   goes back to being a block: inlining it too would run two paragraphs together
+   into one line and lose the break the author typed. */
+figcaption > .md, figcaption > .md > p { display: inline; }
+figcaption > .md > p + p { display: block; }
+
 /* ---- cover ---- */
 /* The cover is the first page, which has zero @page margin (see @page :first),
    so it fills the full 8.5x11in sheet. Its own padding provides the inset; the
@@ -292,6 +319,11 @@ table.tbl .num { font-family: var(--font-mono); text-align: right; white-space: 
 table.tbl td.title { color: var(--bh-black); font-weight: 500; }
 .row-group td { background: var(--bh-light-gray); font-weight: 700; color: var(--bh-black); font-family: var(--font-cond);
                 letter-spacing: 0.06em; text-transform: uppercase; font-size: 12px; }
+/* The engagement goals a summary-table row is linked to, printed as one muted
+   line under the row's description (Summary of Strengths). A line inside the
+   existing cell rather than a column of its own — the table has three columns,
+   descriptions are long, and a fourth would squeeze them. */
+.cell-goals { margin: 6px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--fg-3); }
 
 /* ---- toc ---- */
 .toc { margin-top: 8px; }
@@ -349,7 +381,7 @@ table.tbl td.title { color: var(--bh-black); font-weight: 500; }
 .step { border-left: 2px solid var(--bh-red); padding: 2px 0 4px 16px; margin: 0 0 18px; break-inside: avoid; }
 .step-label { font-family: var(--font-cond); font-weight: 700; font-size: 10px; letter-spacing: 0.1em;
               text-transform: uppercase; color: var(--bh-red); margin: 0 0 5px; }
-.step-caption { white-space: pre-wrap; margin: 0 0 8px; font-size: 14px; line-height: 1.55; color: var(--fg-1); }
+.step-caption { margin: 0 0 8px; font-size: 14px; line-height: 1.55; color: var(--fg-1); }
 
 /* ---- timeline item ---- */
 .tl-item { border-top: 1px solid var(--stroke-light); padding: 16px 0; break-inside: avoid; }
@@ -357,7 +389,7 @@ table.tbl td.title { color: var(--bh-black); font-weight: 500; }
 .tl-when { font-family: var(--font-mono); font-size: 12px; color: var(--bh-red); font-weight: 500; }
 .tl-who { font-size: 12px; color: var(--fg-3); margin-left: 8px; }
 .tl-title { font-size: 14px; font-weight: 600; color: var(--fg-1); margin: 6px 0 0; }
-.tl-desc { font-size: 13px; line-height: 1.55; color: var(--fg-2); margin: 4px 0 0; white-space: pre-wrap; }
+.tl-desc { font-size: 13px; line-height: 1.55; color: var(--fg-2); margin: 4px 0 0; }
 .tl-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; }
 .tl-body { margin-top: 10px; }
 .group-head { font-family: var(--font-cond); font-weight: 700; font-size: 14px; letter-spacing: 0.06em;

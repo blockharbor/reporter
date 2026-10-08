@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Button, Card, Spinner, useToast } from '@reporter/ui';
 import { GOAL_STATUS_LABELS, type LinkedGoal } from '@reporter/shared';
 import {
@@ -11,11 +12,15 @@ import {
 } from '../../api/hooks.js';
 import { GoalStatusDot } from './GoalStatusDot.js';
 import { GoalPickerModal } from './GoalPickerModal.js';
+import { goalHref } from './goalDeepLink.js';
 
 /**
  * A compact "Linked goals" card for an evidence or finding detail page. Lists the
  * goals the item is linked to (with target/activity context and an unlink button)
  * and offers an "Add to goal" picker. Read-only users see the list without controls.
+ *
+ * Each title deep-links to that goal in the Goals tree — see {@link goalHref},
+ * which owns the `?goal=<id>` grammar the Goals page scrolls and flashes on.
  */
 export function LinkedGoalsSection({
   slug,
@@ -100,7 +105,13 @@ export function LinkedGoalsSection({
                 <GoalStatusDot status={g.status} />
               </span>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm text-text">{g.title}</p>
+                <Link
+                  to={goalHref(slug, g.id)}
+                  title="Show this goal in the Goals tree"
+                  className="block truncate rounded text-sm text-text hover:text-accent hover:underline"
+                >
+                  {g.title}
+                </Link>
                 <p className="truncate text-xs text-muted">
                   {g.targetName} · {g.activityName} · {GOAL_STATUS_LABELS[g.status]}
                 </p>

@@ -605,6 +605,11 @@ export const REPORT_SECTION_ITEMS: Partial<Record<ReportSection, ReportSectionIt
       sample: 'Summary table of security strengths (S1, S2, …).',
     },
     {
+      key: 'strengthGoals',
+      label: 'Strength linked goals',
+      sample: 'The goals each strength is linked to, inside its description cell.',
+    },
+    {
       key: 'weaknesses',
       label: 'Weaknesses table',
       sample: 'Summary table of weaknesses with severity and fix effort.',

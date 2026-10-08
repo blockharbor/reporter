@@ -1,5 +1,16 @@
 import { createContext, useContext, useState, type ReactNode } from 'react';
-import { Badge, Button, Card, Checkbox, Field, Input, MarkdownField, Select, Spinner } from '@reporter/ui';
+import { useSearchParams } from 'react-router-dom';
+import {
+  Badge,
+  Button,
+  Card,
+  Checkbox,
+  Field,
+  Input,
+  MarkdownField,
+  Select,
+  Spinner,
+} from '@reporter/ui';
 import {
   EVIDENCE_GROUPINGS,
   EVIDENCE_GROUPING_LABELS,
@@ -23,6 +34,7 @@ import { FindingMultiSelect } from './FindingMultiSelect.js';
 import { TagsFilter } from '../evidence/filters/TagsFilter.js';
 import { TypeFilter } from '../evidence/filters/TypeFilter.js';
 import { useEvidence, useTags } from '../../api/hooks.js';
+import { DEEP_LINK_HIGHLIGHT, useDeepLinkRow } from '../../hooks/useDeepLinkRow.js';
 import { evidenceHeading } from '../../lib/evidence-label.js';
 
 /** Readiness state for a required content section (drives the header badge). */
@@ -50,6 +62,33 @@ export const SectionCollapseContext = createContext<{
   collapsed: Set<string>;
   toggle: (id: string) => void;
 } | null>(null);
+
+/*
+ * Deep link to one strategic recommendation. The Reports page keeps its active
+ * sub-tab in `?section=` (absent means the Content tab), and `?rec=` addresses a
+ * recommendation **by its position** in the list — R1 is `rec=0`. Position is
+ * already this product's identity for a recommendation (the R-numbers printed in
+ * the report are index+1), so there is nothing stabler to point at. Both ends of
+ * the link live in this module: {@link recommendationHref} builds it, and
+ * {@link RecommendationsEditor} consumes it on arrival.
+ */
+const CONTENT_SECTION_PARAM = 'section';
+const CONTENT_SECTION_VALUE = 'content';
+export const RECOMMENDATION_PARAM = 'rec';
+
+/** Href to Reports → Content → Strategic recommendations, scrolled to one item. */
+export function recommendationHref(slug: string, index: number): string {
+  const params = new URLSearchParams({
+    [CONTENT_SECTION_PARAM]: CONTENT_SECTION_VALUE,
+    [RECOMMENDATION_PARAM]: String(index),
+  });
+  return `/engagements/${slug}/reports?${params.toString()}`;
+}
+
+/** DOM id of one recommendation row, so the arriving link can scroll to it. */
+function recommendationRowId(index: number): string {
+  return `rec-row-${index}`;
+}
 
 /** A fresh timeline-subsection filter config (all-inclusive, chronological). */
 const DEFAULT_TIMELINE_CONFIG: ExecutionTimelineConfig = {
@@ -118,6 +157,7 @@ export function ReportContentEditors({
   scope,
   onScope,
   onFlush,
+  seeded,
 }: Common & {
   slug: string;
   /** Free-text scope notes, shown inside the Service scope section. */
@@ -149,6 +189,12 @@ export function ReportContentEditors({
   sectionStatus: Partial<Record<string, SectionStatus>>;
   /** Flush the debounced autosave immediately (called on field blur). */
   onFlush?: () => void;
+  /**
+   * The values are the engagement's, not the parent form's empty initial state
+   * (it seeds in an effect). Only the recommendation deep link reads this, to tell
+   * "this index is past the end of the list" from "the list hasn't arrived yet".
+   */
+  seeded: boolean;
 }) {
   const common: Common = { disabled, disabledTitle, onFlush };
 
@@ -170,9 +216,11 @@ export function ReportContentEditors({
         {...common}
         id="sec-recommendations"
         status={sectionStatus.recommendations}
+        slug={slug}
         items={recommendations}
         onChange={onRecommendations}
         findings={findings}
+        seeded={seeded}
       />
 
       <ThreatModelEditor
@@ -423,21 +471,69 @@ function ScopeEditor({
 
 // --- Strategic Recommendations --------------------------------------------
 
+/**
+ * Arrival side of {@link recommendationHref}, over the shared
+ * {@link useDeepLinkRow}: expands this (collapsed-by-default) section, scrolls the
+ * addressed row into view and flashes it. Returns the index to flash, or null.
+ *
+ * `seeded` says `count` is the engagement's recommendation count rather than the
+ * parent form's empty initial state (it seeds in an effect). Without it a perfectly
+ * good link would be judged against a zero-length list on the first pass, read as
+ * stale, and dropped.
+ */
+function useRecommendationDeepLink(
+  sectionId: string | undefined,
+  count: number,
+  seeded: boolean,
+): number | null {
+  const collapse = useContext(SectionCollapseContext);
+  const [params] = useSearchParams();
+  // The Content tab stays mounted (just hidden) while another sub-tab is active,
+  // and scrolling a hidden subtree does nothing, so the param is held — not spent
+  // — until Content is the tab on screen.
+  const onContentTab =
+    (params.get(CONTENT_SECTION_PARAM) ?? CONTENT_SECTION_VALUE) === CONTENT_SECTION_VALUE;
+  const highlighted = useDeepLinkRow(
+    RECOMMENDATION_PARAM,
+    (raw) => {
+      // A 0-based array position and nothing else. The digits test is load-bearing:
+      // `Number('')` is 0, so a bare `?rec=` would otherwise flash R1.
+      if (!/^\d+$/.test(raw)) return null;
+      const index = Number(raw);
+      if (index >= count) return null;
+      return {
+        rowId: recommendationRowId(index),
+        reveal: () => {
+          if (sectionId && collapse?.collapsed.has(sectionId)) collapse.toggle(sectionId);
+        },
+      };
+    },
+    seeded && onContentTab,
+  );
+  return highlighted === null ? null : Number(highlighted);
+}
+
 function RecommendationsEditor({
   disabled,
   disabledTitle,
   id,
   status,
+  slug,
   items,
   onChange,
   findings,
+  seeded,
 }: Common & {
   id?: string;
   status?: SectionStatus;
+  slug: string;
   items: RecommendationItem[];
   onChange: (v: RecommendationItem[]) => void;
   findings: Finding[];
+  /** The list is the engagement's, not the parent form's empty initial state. */
+  seeded: boolean;
 }) {
+  const highlighted = useRecommendationDeepLink(id, items.length, seeded);
   // Coverage: which weaknesses are addressed by at least one recommendation.
   const weaknesses = findings.filter((f) => f.kind === 'weakness');
   const covered = new Set(items.flatMap((i) => i.findingUuids ?? []));
@@ -497,7 +593,12 @@ function RecommendationsEditor({
           // Only nag once a recommendation has real content to link.
           const needsLink = item.title.trim().length > 0 && linked.length === 0;
           return (
-            <div className="space-y-2">
+            <div
+              id={recommendationRowId(index)}
+              className={`space-y-2 rounded-input transition-colors ${
+                highlighted === index ? DEEP_LINK_HIGHLIGHT : ''
+              }`}
+            >
               <div className="flex items-center gap-2">
                 <Badge tone="accent">R{index + 1}</Badge>
                 {needsLink && <Badge tone="warning">Link a finding</Badge>}
@@ -529,6 +630,7 @@ function RecommendationsEditor({
               >
                 <FindingMultiSelect
                   id={`rec-find-${index}`}
+                  slug={slug}
                   findings={findings}
                   selected={linked}
                   onChange={(findingUuids) => update({ ...item, findingUuids })}
@@ -832,7 +934,11 @@ function ExecutionTimelineEditor({
           </Select>
         </Field>
         <div className="flex items-center gap-2 pb-0.5">
-          <TagsFilter value={cfg.tags} tags={tags} onChange={(t) => onChange({ ...cfg, tags: t })} />
+          <TagsFilter
+            value={cfg.tags}
+            tags={tags}
+            onChange={(t) => onChange({ ...cfg, tags: t })}
+          />
           <TypeFilter value={cfg.types} onChange={(t) => onChange({ ...cfg, types: t })} />
         </div>
       </div>

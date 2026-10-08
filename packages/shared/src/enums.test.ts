@@ -145,6 +145,33 @@ describe('evidenceFileExtension', () => {
   });
 });
 
+describe('REPORT_SECTION_ITEMS.assessmentFindings', () => {
+  const items = REPORT_SECTION_ITEMS.assessmentFindings ?? [];
+
+  it('lists the strengths-table goals line right after the table it sits in', () => {
+    const keys = items.map((i) => i.key);
+    expect(keys).toEqual([
+      'strengths',
+      'strengthGoals',
+      'weaknesses',
+      'recommendations',
+      'categories',
+      'standards',
+    ]);
+  });
+
+  /**
+   * Same absent-means-true rule as the execution section: `strengthGoals` names the
+   * line that renders, so every configuration saved before it existed reads as
+   * `true` and the goals appear — which is the intended default.
+   */
+  it('phrases the goals key as content shown, so it defaults on', () => {
+    const goals = items.find((i) => i.key === 'strengthGoals');
+    expect(goals).toBeDefined();
+    expect(goals!.key).not.toMatch(/^(hide|no|omit|exclude|suppress)/i);
+  });
+});
+
 describe('REPORT_SECTION_ITEMS.assessmentExecution', () => {
   const items = REPORT_SECTION_ITEMS.assessmentExecution ?? [];
 
@@ -212,5 +239,36 @@ describe('showFindingLinkedGoals', () => {
     expect(
       reportTemplateConfigSchema.parse({ showFindingLinkedGoals: false }).showFindingLinkedGoals,
     ).toBe(false);
+  });
+});
+
+/*
+ * Strength detail cards are the one strengths option that is NOT a section
+ * sub-item: `detailedFindings`' sub-items are absent-means-shown, so a key there
+ * would switch the cards on for every engagement at once. A top-level flag
+ * defaulting false is what keeps existing reports byte-identical, and that default
+ * is the whole contract — hence an assertion on it.
+ */
+describe('showStrengthDetailCards', () => {
+  it('defaults to false, so no existing report gains strength cards', () => {
+    expect(reportConfigSchema.parse({}).showStrengthDetailCards).toBe(false);
+    // A stored config written before the field — the realistic shape, not just `{}`.
+    expect(
+      reportConfigSchema.parse({ findingGroup: 'category', showFindingLinkedGoals: false })
+        .showStrengthDetailCards,
+    ).toBe(false);
+  });
+
+  it('is opted in to explicitly', () => {
+    expect(
+      reportConfigSchema.parse({ showStrengthDetailCards: true }).showStrengthDetailCards,
+    ).toBe(true);
+  });
+
+  it('travels with a report template (derived via .omit, so no restating needed)', () => {
+    expect(reportTemplateConfigSchema.parse({}).showStrengthDetailCards).toBe(false);
+    expect(
+      reportTemplateConfigSchema.parse({ showStrengthDetailCards: true }).showStrengthDetailCards,
+    ).toBe(true);
   });
 });

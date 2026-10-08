@@ -187,6 +187,14 @@ export interface ReportOptions {
    * dropping content the configuration asks for. See {@link renderFinding}.
    */
   showFindingLinkedGoals?: boolean;
+  /**
+   * Render a detail card per strength in Detailed Findings, after the weaknesses.
+   * Omitted means off, matching the config schema's `false` default, so a report
+   * built before this field existed gains no pages: a strength keeps appearing
+   * only as a row in the Summary of Strengths table. See {@link renderFinding}
+   * for what a strength's card does and does not carry.
+   */
+  showStrengthDetailCards?: boolean;
 }
 
 export interface JsonExportOptions extends ReportOptions {
@@ -621,10 +629,40 @@ async function renderEvidence(
   // fallback is what `typeCaptions: false` drops — so the caption line can come
   // out empty here, and every branch below has to cope with having none.
   const own = e.title || e.description;
-  const caption = esc(own || (display.typeCaptions ? evidenceTypeLabel(e.contentType) : ''));
+  /**
+   * The caption as plain text. Kept separate from its rendered form because this
+   * is the one caption value that also goes into an `alt` attribute, where
+   * rendered markup would be read out as literal tags — see the image branch.
+   * Both forms derive from this single string, so they can never disagree.
+   */
+  const captionText = own || (display.typeCaptions ? evidenceTypeLabel(e.contentType) : '');
+  /*
+   * Which field supplied the caption decides how it prints, so the same string is
+   * never rendered in one part of the document and verbatim in another:
+   *
+   * - a *description* is authored in the markdown editor (Write/Preview tabs,
+   *   "Markdown supported"), so it renders as markdown instead of printing
+   *   `**bold**` and `- list` literally;
+   * - a *title* is a plain `<Input>` everywhere it is authored — the evidence
+   *   detail page, the Add-evidence modal, the desktop Compose view — and the
+   *   timeline prints it with `esc()`, so it stays verbatim here too. Rendering it
+   *   would italicise a title like `Dump of _etc_shadow_ via LFI` in a figure
+   *   caption while the timeline left it alone, and a title opening `# ` or `1. `
+   *   would emit a heading or a list inside the `<figcaption>`;
+   * - the content-type fallback is one of this build's own constant labels
+   *   ("Script", "Screenshot") — not authored prose, nothing to render — so it
+   *   stays verbatim too, which keeps the caption line byte-identical for an item
+   *   with no words of its own.
+   */
+  const caption = e.title ? esc(e.title) : e.description ? prose(e.description) : esc(captionText);
   const captionTag = caption ? `<figcaption>${caption}</figcaption>` : '';
-  /** The caption alone, for the branches that have no body to hang it under. */
-  const captionOnly = caption ? `<div class="ev"><p class="ev-note">${caption}</p></div>` : '';
+  /**
+   * The caption alone, for the branches that have no body to hang it under. A
+   * `<div class="ev-note">` rather than a `<p>`: the renderer emits a `<div>`, and
+   * a `<div>` inside a `<p>` makes the parser close the paragraph early, orphaning
+   * its class.
+   */
+  const captionOnly = caption ? `<div class="ev"><div class="ev-note">${caption}</div></div>` : '';
 
   // Never read a terminal recording — casts can be large and can't render
   // statically in a PDF. Reference it instead of pulling the blob into memory.
@@ -662,8 +700,10 @@ async function renderEvidence(
     const b64 = buf.toString('base64');
     budget.remaining -= b64.length;
     // `alt` describes the image for a screen reader rather than printing on the
-    // page, so it keeps the type label even when the visible caption is off.
-    const alt = caption || esc(evidenceTypeLabel(e.contentType));
+    // page, so it keeps the type label even when the visible caption is off. It
+    // takes the *plain-text* caption: the rendered one is HTML, and HTML in an
+    // attribute is read out as its own tags.
+    const alt = esc(captionText.trim() || evidenceTypeLabel(e.contentType));
     return `<figure class="ev"><img src="data:${mime};base64,${b64}" alt="${alt}" />${captionTag}</figure>`;
   }
   if (buf) {
@@ -673,9 +713,11 @@ async function renderEvidence(
     // The language/interpreter chip is a property of the content, not the
     // type-label caption, so it survives `typeCaptions: false` on its own line.
     // Joined rather than concatenated, so a suppressed caption does not leave a
-    // `<figcaption>` that opens with a stray space.
-    const capText = [caption, lang].filter(Boolean).join(' ');
-    const capLine = capText ? `<figcaption>${capText}</figcaption>` : '';
+    // `<figcaption>` that opens with a stray space. The caption is a rendered
+    // markdown block; the stylesheet flows a single-paragraph one inline so the
+    // chip stays on the caption's line, as it always has.
+    const capInner = [caption, lang].filter(Boolean).join(' ');
+    const capLine = capInner ? `<figcaption>${capInner}</figcaption>` : '';
     // Notes, events, and code blocks are authored as markdown (the Add-evidence
     // "Content" field is a markdown editor with a Preview tab), so render them the
     // same way here — the PDF then matches that preview. Scripts are deliberately
@@ -697,7 +739,12 @@ async function renderPathStep(
   step: number,
   budget: Budget,
 ): Promise<string> {
-  const captionHtml = e.caption ? `<p class="step-caption">${esc(e.caption)}</p>` : '';
+  // The step caption comes out of the same markdown editor as the rest of the
+  // report's prose, so it renders as markdown. A `<div>` wrapper, not a `<p>`:
+  // the renderer emits a block element, and a `<div>` inside a `<p>` makes the
+  // parser close the paragraph early and orphan its class.
+  const captionMd = prose(e.caption);
+  const captionHtml = captionMd ? `<div class="step-caption">${captionMd}</div>` : '';
   const evidenceHtml = await renderEvidence(app, e, budget);
   return `<div class="step"><p class="step-label">Step ${step}</p>${captionHtml}${evidenceHtml}</div>`;
 }
@@ -813,10 +860,21 @@ async function fetchFindingGoals(
 }
 
 /**
- * Render one weakness's detailed subsection (heading, meta, description, impact,
+ * Render one finding's detailed subsection (heading, meta, description, impact,
  * standards mapping, remediation, evidence). `label` is the cross-reference id
- * (e.g. "W1"). `parts` gates the optional sub-blocks (Detailed Findings section
- * toggles). Strengths are summary-table only and never rendered here.
+ * (e.g. "W1", or "S1" for a strength). `parts` gates the optional sub-blocks
+ * (Detailed Findings section toggles).
+ *
+ * A **strength** renders the same card minus every field a strength cannot
+ * carry. The create/update routes (and the importer) actively clear `severity`,
+ * `cvss*`, `fixEffort`, `impact` and `remediation` on a strength, so those would
+ * come out blank; each is skipped by kind rather than by emptiness, so no heading
+ * can ever print with nothing under it and a legacy row that still holds a stale
+ * rating cannot sneak one onto a strength's card. The Attack Path bucket is
+ * skipped too — an attack path is the narrative of a weakness — which is why the
+ * evidence guard below stays silent instead of claiming a strength has no
+ * evidence. Strength cards only render when `showStrengthDetailCards` asks for
+ * them; otherwise a strength appears only in the Summary of Strengths table.
  */
 async function renderFinding(
   app: FastifyInstance,
@@ -837,21 +895,28 @@ async function renderFinding(
   const pathEvidence = f.evidence.filter((e) => e.inPath);
   const attachedEvidence = f.evidence.filter((e) => !e.inPath);
 
+  /** A strength carries no risk rating, impact, remediation or attack path. */
+  const isStrength = f.kind === 'strength';
+
   const meta: string[] = [];
   meta.push(`<strong>Category:</strong> ${f.category ? esc(f.category) : 'Uncategorized'}`);
   if (f.affectedTarget.trim())
     meta.push(`<strong>Affected target:</strong> ${esc(f.affectedTarget)}`);
-  if (f.cvssScore != null) meta.push(`<strong>CVSS:</strong> ${f.cvssScore.toFixed(1)}`);
-  if (f.cvssVector) meta.push(`<code>${esc(f.cvssVector)}</code>`);
-  if (f.fixEffort && f.fixEffort !== 'none')
-    meta.push(`<strong>Fix effort:</strong> ${esc(FIX_EFFORT_LABELS[f.fixEffort])}`);
+  if (!isStrength) {
+    if (f.cvssScore != null) meta.push(`<strong>CVSS:</strong> ${f.cvssScore.toFixed(1)}`);
+    if (f.cvssVector) meta.push(`<code>${esc(f.cvssVector)}</code>`);
+    if (f.fixEffort && f.fixEffort !== 'none')
+      meta.push(`<strong>Fix effort:</strong> ${esc(FIX_EFFORT_LABELS[f.fixEffort])}`);
+  }
 
   const descHtml = prose(f.description) || '<p class="pp muted">No description provided.</p>';
   const impactHtml =
-    parts.impact && f.impact.trim() ? `<h4 class="sub">Impact</h4>${prose(f.impact)}` : '';
+    !isStrength && parts.impact && f.impact.trim()
+      ? `<h4 class="sub">Impact</h4>${prose(f.impact)}`
+      : '';
   const standardsHtml = parts.standards ? standardsBlock(f.iso21434Refs, f.unr155Refs) : '';
   const remediationHtml =
-    parts.remediation && f.remediation.trim()
+    !isStrength && parts.remediation && f.remediation.trim()
       ? `<h4 class="sub">Remediation</h4>${prose(f.remediation)}`
       : '';
   const recsHtml =
@@ -887,7 +952,7 @@ async function renderFinding(
 
   // Render evidence sequentially so at most one blob is held in memory at once.
   let pathHtml = '';
-  if (parts.attackPath && pathEvidence.length > 0) {
+  if (!isStrength && parts.attackPath && pathEvidence.length > 0) {
     const steps: string[] = [];
     for (let s = 0; s < pathEvidence.length; s++) {
       steps.push(await renderPathStep(app, pathEvidence[s]!, s + 1, budget));
@@ -917,7 +982,7 @@ async function renderFinding(
       <div class="finding-head">
         <span class="finding-num">${esc(label)}</span>
         <span class="finding-title">${esc(f.title)}</span>
-        ${severityPill(f.severity, f.cvssScore)}
+        ${isStrength ? '' : severityPill(f.severity, f.cvssScore)}
       </div>
       <p class="finding-meta">${meta.join('<span class="sep">·</span>')}</p>
       <h4 class="sub">Description</h4>
@@ -984,7 +1049,11 @@ async function renderTimelineItem(
       ? `<div class="tl-tags">${e.tags.map((t) => tagChip(t.name, t.colorName)).join('')}</div>`
       : '';
   const title = e.title.trim() ? `<p class="tl-title">${esc(e.title)}</p>` : '';
-  const desc = e.description.trim() ? `<p class="tl-desc">${esc(e.description)}</p>` : '';
+  // The description is markdown-authored (the Add-evidence "Description" field is
+  // a markdown editor), so it renders as markdown, in a `<div>` — the renderer's
+  // block output would close a `<p class="tl-desc">` and orphan the class.
+  const descMd = prose(e.description);
+  const desc = descMd ? `<div class="tl-desc">${descMd}</div>` : '';
   const body = await renderEvidence(
     app,
     {
@@ -1218,18 +1287,41 @@ function renderScope(targets: ScopeTarget[], exclusions: string[]): string {
   return parts.join('');
 }
 
-/** Summary of Strengths table (IDs S1, S2, …). Empty string when none. */
-function renderStrengthsTable(strengths: GatheredFinding[]): string {
+/**
+ * Summary of Strengths table (IDs S1, S2, …). Empty string when none.
+ *
+ * `goalsByFinding` is the very map Detailed Findings prints its linked goals
+ * from — one query feeding both surfaces, so a strength's goals come out in the
+ * same order in the table and on a detail card. `showGoals` is the section's
+ * `strengthGoals` sub-item (absent means on, like every sub-item).
+ */
+function renderStrengthsTable(
+  strengths: GatheredFinding[],
+  goalsByFinding: ReadonlyMap<string, LinkedGoalRef[]>,
+  showGoals: boolean,
+): string {
   if (strengths.length === 0) return '';
   const rows = strengths
-    .map(
-      (f, i) => `
+    .map((f, i) => {
+      // The description is markdown-authored, exactly like a weakness's. The
+      // affected target is a plain identifier, so it stays the verbatim fallback.
+      const desc = prose(f.description) || esc(f.affectedTarget) || '—';
+      const goals = showGoals ? (goalsByFinding.get(f.uuid) ?? []) : [];
+      // One muted line inside the description cell, not a fourth column —
+      // descriptions are long and a column would squeeze them. Titles only: the
+      // "Target · Activity" context a detail card prints does not fit a cell. A
+      // strength with no linked goals prints nothing at all, never "No linked
+      // goals" — same rule as the detail card (see {@link renderFinding}).
+      const goalsLine = goals.length
+        ? `<p class="cell-goals">Linked goals: ${goals.map((g) => esc(g.title)).join('; ')}</p>`
+        : '';
+      return `
       <tr>
         <td class="num">S${i + 1}</td>
         <td class="title">${esc(f.title)}</td>
-        <td>${esc(f.description) || esc(f.affectedTarget) || '—'}</td>
-      </tr>`,
-    )
+        <td>${desc}${goalsLine}</td>
+      </tr>`;
+    })
     .join('');
   return `<h3 class="block-h">Summary of Strengths</h3>
     <table class="tbl"><thead><tr><th class="num">#</th><th>Strength</th><th>Description</th></tr></thead>
@@ -1308,7 +1400,9 @@ function renderRecommendationsTable(recs: RecommendationItem[]): string {
   const rows = valid
     .map(
       (r, i) =>
-        `<tr><td class="num">R${i + 1}</td><td class="title">${esc(r.title)}</td><td>${esc(r.description) || '—'}</td></tr>`,
+        // The description is authored in the markdown editor; the title is a
+        // plain one-liner in the app too, so it stays verbatim.
+        `<tr><td class="num">R${i + 1}</td><td class="title">${esc(r.title)}</td><td>${prose(r.description) || '—'}</td></tr>`,
     )
     .join('');
   return `<h3 class="block-h">Strategic Recommendations</h3>
@@ -1404,6 +1498,13 @@ function renderFilesAttached(files: SupportingFileMeta[]): string {
  * Scope & Objectives Coverage: per-target tables of activities → goals with each
  * goal's status and the count of linked findings/evidence, plus a coverage lede.
  * Driven by the engagement's goals tree (Target → Activity → Goal).
+ *
+ * The engagement's `objectivesNarrative` is deliberately *not* printed here. The
+ * Goals tab's hint does promise it appears in "the report's scope coverage", but
+ * no report has ever carried it: adding it would silently grow a new paragraph on
+ * every re-generated deliverable, which is a feature needing its own opt-in flag
+ * (see `showStrengthDetailCards` for the shape), not a side effect of rendering
+ * the fields that were already printed.
  */
 function renderScopeCoverage(targets: Target[], progress: EngagementProgress): string {
   if (targets.length === 0) return '<p class="pp muted">No scope targets recorded.</p>';
@@ -1431,7 +1532,11 @@ function renderScopeCoverage(targets: Target[], progress: EngagementProgress): s
     const body = rows.length
       ? rows.join('')
       : '<tr><td colspan="4" class="muted">No activities recorded.</td></tr>';
-    const desc = t.description.trim() ? `<p class="pp muted">${esc(t.description)}</p>` : '';
+    // The target's description is markdown-authored too, so it renders as
+    // markdown inside a `<div class="pp muted">` — a `<div>` because the
+    // renderer's block output would close a `<p>` and orphan both classes.
+    const descMd = prose(t.description);
+    const desc = descMd ? `<div class="pp muted">${descMd}</div>` : '';
     parts.push(
       `<h3 class="block-h">${esc(t.name)}</h3>${desc}<table class="tbl"><thead><tr><th>Activity</th><th>Goal</th><th>Status</th><th class="num">Findings / Evidence</th></tr></thead><tbody>${body}</tbody></table>`,
     );
@@ -1553,7 +1658,12 @@ async function renderExecutionNarrative(
       // figure is dropped and the narrative prose stands on its own — the caption
       // goes with it, so nothing hints at the omission.
       if (!ev) continue;
-      const cap = ref.caption?.trim() ? `<p class="step-caption">${esc(ref.caption)}</p>` : '';
+      // An embedded figure's caption renders exactly like an Attack Path step's
+      // (see {@link renderPathStep}) — same element, same `.step-caption` class,
+      // which no longer carries `white-space: pre-wrap` precisely because every
+      // one of its users goes through the markdown renderer.
+      const capMd = prose(ref.caption);
+      const cap = capMd ? `<div class="step-caption">${capMd}</div>` : '';
       // Embedded narrative figures take the section's display sub-items too, so a
       // script hand-placed in the prose obeys the same toggle as one in a timeline.
       const evHtml = await renderEvidence(app, ev, budget, show);
@@ -1735,16 +1845,35 @@ export async function buildReportHtml(
     : [];
   const coverageProgress: EngagementProgress = progressFromTree(coverageTargets);
 
-  // Per-finding linked goals, gated the same way: one query, and only when the
-  // block can actually appear — the report asks for it (omitted means yes, the
-  // schema default) and Detailed Findings is rendering. Keyed by finding uuid,
-  // like `recsByFinding` above.
+  // Per-finding linked goals, gated the same way: one query, and only when a
+  // block that prints them can actually appear. Keyed by finding uuid, like
+  // `recsByFinding` above.
+  //
+  // Two surfaces read this one map, so neither can list a finding's goals in a
+  // different order than the other:
+  //
+  // - Detailed Findings' per-card block — the report asks for it (omitted means
+  //   yes, the schema default) and the section is rendering.
+  // - the Summary of Strengths table's per-row line — the Assessment Findings
+  //   section is rendering, its `strengths` table and `strengthGoals` line are
+  //   both on (absent means on, like every sub-item), and there is at least one
+  //   strength for the line to hang off. Without those last two conjuncts this
+  //   query would run for all but a handful of configurations, since every part
+  //   of it but the section toggle defaults to true.
   const wantFindingGoals =
     opts.showFindingLinkedGoals !== false &&
     effectiveEntries.some((s) => s.key === 'detailedFindings' && s.enabled);
-  const goalsByFinding: Map<string, LinkedGoalRef[]> = wantFindingGoals
-    ? await fetchFindingGoals(app, eng.id)
-    : new Map();
+  const wantStrengthGoals =
+    strengths.length > 0 &&
+    effectiveEntries.some(
+      (s) =>
+        s.key === 'assessmentFindings' &&
+        s.enabled &&
+        s.options?.strengths !== false &&
+        s.options?.strengthGoals !== false,
+    );
+  const goalsByFinding: Map<string, LinkedGoalRef[]> =
+    wantFindingGoals || wantStrengthGoals ? await fetchFindingGoals(app, eng.id) : new Map();
 
   // Section 01 is always Engagement Details; content sections number from 02 in
   // their configured, rendered order, so the TOC never drifts.
@@ -1988,7 +2117,8 @@ export async function buildReportHtml(
       }
       case 'assessmentFindings': {
         const parts: string[] = [];
-        if (partOn('strengths')) parts.push(renderStrengthsTable(strengths));
+        if (partOn('strengths'))
+          parts.push(renderStrengthsTable(strengths, goalsByFinding, partOn('strengthGoals')));
         if (partOn('weaknesses')) parts.push(renderWeaknessesTable(weaknessGroups));
         if (partOn('recommendations')) parts.push(renderRecommendationsTable(recommendations));
         if (partOn('categories')) parts.push(categoryTable);
@@ -2146,6 +2276,12 @@ export async function buildReportHtml(
           attackPath: partOn('attackPath'),
           attachedEvidence: partOn('attachedEvidence'),
         };
+        // `goalsByFinding` is also loaded for the Summary of Strengths table, so a
+        // card only reads it when *this* block was asked for — otherwise turning
+        // the strengths table's goals line on would print per-card goal blocks a
+        // report explicitly opted out of.
+        const cardGoals = (uuid: string): LinkedGoalRef[] =>
+          wantFindingGoals ? (goalsByFinding.get(uuid) ?? []) : [];
         const findingBlocks: string[] = [];
         if (weaknesses.length === 0) {
           findingBlocks.push('<p class="pp muted">No weaknesses to report.</p>');
@@ -2167,10 +2303,37 @@ export async function buildReportHtml(
                   budget,
                   findingParts,
                   recsByFinding.get(f.uuid) ?? [],
-                  goalsByFinding.get(f.uuid) ?? [],
+                  cardGoals(f.uuid),
                 ),
               );
             }
+          }
+        }
+
+        // Strength detail cards: opt-in (see `showStrengthDetailCards`), after
+        // every weakness and under their own heading, so the weakness sequence the
+        // TOC indexes is never interrupted. Numbered S1, S2, … over the same
+        // author-ordered `strengths` array the Summary of Strengths table numbers,
+        // so S2 in one place is S2 in the other. They take the section's own
+        // sub-item toggles unchanged — `renderFinding` drops the ones a strength
+        // cannot fill rather than printing an empty heading.
+        if (opts.showStrengthDetailCards === true && strengths.length > 0) {
+          findingBlocks.push(
+            `<h3 class="block-h">Strengths <span class="group-count">(${strengths.length})</span></h3>`,
+          );
+          for (let i = 0; i < strengths.length; i++) {
+            const f = strengths[i]!;
+            findingBlocks.push(
+              await renderFinding(
+                app,
+                f,
+                `S${i + 1}`,
+                budget,
+                findingParts,
+                recsByFinding.get(f.uuid) ?? [],
+                cardGoals(f.uuid),
+              ),
+            );
           }
         }
         rendered.push({

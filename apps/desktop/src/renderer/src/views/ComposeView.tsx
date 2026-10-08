@@ -10,6 +10,7 @@ import {
   EmptyState,
   Field,
   Input,
+  MarkdownField,
   Select,
   TagPicker,
   Textarea,
@@ -264,8 +265,11 @@ export function ComposeView({
         />
       </Field>
 
+      {/* The web UI authors this field as markdown and the report renders it as
+          markdown, so the tray uses the same editor — a single-line input could
+          not even hold the lists and paragraphs that end up in the deliverable. */}
       <Field label="Description" htmlFor="desc">
-        <Input id="desc" value={description} onChange={(e) => setDescription(e.target.value)} />
+        <MarkdownField id="desc" rows={3} value={description} onChange={setDescription} />
       </Field>
 
       {draft.contentType === 'codeblock' && (

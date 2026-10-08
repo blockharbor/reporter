@@ -413,7 +413,9 @@ export function ReportContentForm({
           <Field
             label="Color"
             htmlFor="wm-color"
-            error={!disabled && form.wmEnabled && colorInvalid ? 'Use a #rrggbb hex color.' : undefined}
+            error={
+              !disabled && form.wmEnabled && colorInvalid ? 'Use a #rrggbb hex color.' : undefined
+            }
           >
             <div className="flex items-center gap-2">
               <input
@@ -492,26 +494,27 @@ export function ReportContentForm({
           onScope={(v) => patchForm('scope', v)}
           scopeTargets={form.scopeTargets}
           onScopeTargets={(v) => patchForm('scopeTargets', v)}
-        scopeExclusions={form.scopeExclusions}
-        onScopeExclusions={(v) => patchForm('scopeExclusions', v)}
-        recommendations={form.recommendations}
-        onRecommendations={(v) => patchForm('recommendations', v)}
-        threatModelNarrative={form.threatModelNarrative}
-        onThreatModelNarrative={(v) => patchForm('threatModelNarrative', v)}
-        threatModelDiagrams={form.threatModelDiagrams}
-        onThreatModelDiagrams={(v) => patchForm('threatModelDiagrams', v)}
-        executionNarrative={form.executionNarrative}
-        onExecutionNarrative={(v) => patchForm('executionNarrative', v)}
-        providerContacts={form.providerContacts}
-        onProviderContacts={(v) => patchForm('providerContacts', v)}
-        clientContacts={form.clientContacts}
-        onClientContacts={(v) => patchForm('clientContacts', v)}
-        softwareTested={form.softwareTested}
-        onSoftwareTested={(v) => patchForm('softwareTested', v)}
-        thirdPartySoftware={form.thirdPartySoftware}
-        onThirdPartySoftware={(v) => patchForm('thirdPartySoftware', v)}
+          scopeExclusions={form.scopeExclusions}
+          onScopeExclusions={(v) => patchForm('scopeExclusions', v)}
+          recommendations={form.recommendations}
+          onRecommendations={(v) => patchForm('recommendations', v)}
+          threatModelNarrative={form.threatModelNarrative}
+          onThreatModelNarrative={(v) => patchForm('threatModelNarrative', v)}
+          threatModelDiagrams={form.threatModelDiagrams}
+          onThreatModelDiagrams={(v) => patchForm('threatModelDiagrams', v)}
+          executionNarrative={form.executionNarrative}
+          onExecutionNarrative={(v) => patchForm('executionNarrative', v)}
+          providerContacts={form.providerContacts}
+          onProviderContacts={(v) => patchForm('providerContacts', v)}
+          clientContacts={form.clientContacts}
+          onClientContacts={(v) => patchForm('clientContacts', v)}
+          softwareTested={form.softwareTested}
+          onSoftwareTested={(v) => patchForm('softwareTested', v)}
+          thirdPartySoftware={form.thirdPartySoftware}
+          onThirdPartySoftware={(v) => patchForm('thirdPartySoftware', v)}
           findings={findings}
           sectionStatus={sectionStatus}
+          seeded={baseline !== undefined}
         />
       </SectionCollapseContext.Provider>
     </div>

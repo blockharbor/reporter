@@ -3,19 +3,22 @@ import type { FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import {
+  EDITABLE_TEXT_EVIDENCE_TYPES,
+  EVIDENCE_TYPE_LABELS,
   MAX_SCRIPT_BYTES,
   SCRIPT_TOO_LARGE_REASON,
   createEvidenceCommentInput,
   evidenceCarriesSubtype,
   evidenceFileExtension,
   isEditableTextEvidence,
+  isEvidenceType,
   parseQuery,
   updateEvidenceCommentInput,
   updateEvidenceInput,
 } from '@reporter/shared';
 import { requireAuth, requireEngagementRole, HttpError } from '../../auth/guards.js';
 import { parsePagination } from '../../helpers/pagination.js';
-import { createEvidence, listEvidence } from '../../services/evidence.js';
+import { createEvidence, decodeScriptUpload, listEvidence } from '../../services/evidence.js';
 import {
   evidenceInclude,
   serializeEvidence,
@@ -75,6 +78,22 @@ function evidenceDisposition(ev: DownloadNameable): string {
     (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase(),
   );
   return `${type}; filename="${ascii}"; filename*=UTF-8''${utf8}`;
+}
+
+/**
+ * The types a piece of evidence may be re-typed to, as report-caption labels —
+ * derived from `EVIDENCE_TEXT_EDITABLE`, so a new text type joins this sentence
+ * without being hand-added to it.
+ */
+const TEXT_TYPE_LABELS = EDITABLE_TEXT_EVIDENCE_TYPES.map((t) => EVIDENCE_TYPE_LABELS[t]).join(
+  ', ',
+);
+
+/** Label for a stored `contentType`, narrowed rather than cast: the column is
+ *  plain TEXT, so a value this build doesn't know prints as itself instead of
+ *  `undefined`. */
+function typeLabel(contentType: string): string {
+  return isEvidenceType(contentType) ? EVIDENCE_TYPE_LABELS[contentType] : contentType;
 }
 
 export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
@@ -368,8 +387,8 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // Update title / description / tags / occurredAt / report exclusion / body text /
-  // language-interpreter, and optionally re-parent the evidence (attach/move/detach
-  // its comment link) via `parentEvidenceUuid`.
+  // language-interpreter / content type, and optionally re-parent the evidence
+  // (attach/move/detach its comment link) via `parentEvidenceUuid`.
   app.put(
     '/engagements/:slug/evidence/:uuid',
     { preHandler: [requireAuth, requireEngagementRole('write')] },
@@ -392,6 +411,48 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       }
       let parentEvidenceId: number | null = null;
 
+      // Type change — code block ↔ script above all, now that one renders through
+      // the markdown renderer and the other prints verbatim. Allowed between any
+      // two text-backed types, in either direction, because they all store the same
+      // UTF-8 text blob: the change is metadata only and the stored bytes are never
+      // rewritten. `isEditableTextEvidence` is that set — the same one that decides
+      // whether the body is editable at all, rather than a second hand-written list
+      // of permitted pairs that would drift from it.
+      const requestedType = body.contentType;
+      const changingType = requestedType !== undefined && requestedType !== ev.contentType;
+      if (changingType) {
+        // 400 like the content/interpreter guards below, and for the same reason:
+        // the payload is well formed and names a real type, it just asks for
+        // something this row's stored bytes cannot support. Both messages name the
+        // side that failed — "the request was invalid" would leave the operator to
+        // guess which of the two types was the problem.
+        //
+        // Phrased by what the stored file *is for* rather than by its bytes: an
+        // asciicast is perfectly good text, so "not text" is a reason the operator
+        // could disprove by opening it. What rules a recording out is that its file
+        // is a player's format with no editable body in it, which is true of a
+        // screenshot too.
+        if (!isEditableTextEvidence(ev.contentType)) {
+          throw new HttpError(
+            400,
+            `A ${typeLabel(ev.contentType)} can't change type — what's stored for it is a file only its own viewer reads, not an editable text body. Only text evidence (${TEXT_TYPE_LABELS}) can be re-typed.`,
+          );
+        }
+        if (!isEditableTextEvidence(requestedType)) {
+          throw new HttpError(
+            400,
+            `This evidence can't become a ${EVIDENCE_TYPE_LABELS[requestedType]} — that type is stored as a file for its own viewer, and this evidence holds an editable text body. Pick one of ${TEXT_TYPE_LABELS}.`,
+          );
+        }
+      }
+      /**
+       * The type this request leaves behind. Everything below reads it instead of
+       * `ev.contentType`: one request may change the type *and* the interpreter (a
+       * code block becoming a `bash` script), and judging the interpreter against
+       * the stale stored type would refuse that legitimate edit outright.
+       */
+      const effectiveType = requestedType ?? ev.contentType;
+
       // Content edit: replace the stored text blob. Only text evidence has an
       // editable body; images/recordings keep their uploaded file. The new blob is
       // written up front (outside the DB tx, mirroring create); the old one is
@@ -400,8 +461,34 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       // — a hand-copied list here is how this route came to reject a `content` update
       // for a type the web app was happily offering an editor for.
       const editingContent = body.content !== undefined;
-      if (editingContent && !isEditableTextEvidence(ev.contentType)) {
+      if (editingContent && !isEditableTextEvidence(effectiveType)) {
         throw new HttpError(400, "This evidence type's content can't be edited.");
+      }
+
+      /*
+       * Becoming a script means taking on the only type-level invariant any of
+       * these types has about its stored bytes: UTF-8 text, no embedded NULs, and
+       * under `MAX_SCRIPT_BYTES`. Both ways into that column already enforce it
+       * (`decodeScriptUpload` for an upload, the same cap for typed content), and a
+       * re-type is now a third — so it has to enforce it too. Neither precondition
+       * is exotic: the cap is a script's alone, so a 2 MB code block is ordinary,
+       * and nothing at create pairs an uploaded `file` with a *text* type, so a
+       * code block whose blob is a binary is equally ordinary. Relabelled into a
+       * script, either one renders verbatim — a wall of replacement characters, or
+       * a megabyte of text, straight into a client's PDF.
+       *
+       * Only when the request isn't also replacing the body: then it is the new
+       * bytes that matter, and those are checked below against the same cap.
+       */
+      if (changingType && effectiveType === 'script' && !editingContent && ev.fullBlobKey) {
+        // Size off the column first. Refusing an oversized blob must not require
+        // reading it into memory, which is the very thing the cap exists to prevent.
+        if ((ev.sizeBytes ?? 0) > MAX_SCRIPT_BYTES) {
+          throw new HttpError(413, SCRIPT_TOO_LARGE_REASON);
+        }
+        // Then the text test itself, from the one place that owns it — it re-checks
+        // the size as well, which also covers a row whose `sizeBytes` is missing.
+        decodeScriptUpload(await app.blobs.getBuffer(ev.fullBlobKey));
       }
 
       // Language / interpreter edit. Correctable on purpose: for a script this value
@@ -410,13 +497,35 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       // remedy while the column was write-once. Refused outright for a type that has
       // no reader for it (`evidenceCarriesSubtype`) rather than stored and ignored.
       // Blank normalizes to null, so "no interpreter" is one value in the column.
+      // Judged against `effectiveType`: a code block becoming a `bash` script sends
+      // both fields in one request, and checking the interpreter against the type
+      // being left behind would refuse that edit for a type it no longer has.
+      // An explicit `null` is exempt: it is a clear, not a value, and there is
+      // nothing for a type with no reader to disagree with. Refusing it made the
+      // obvious request — "become a Note and drop the interpreter" — an error,
+      // while *omitting* the field cleared the column anyway (just below).
       const editingSubtype = body.contentSubtype !== undefined;
-      if (editingSubtype && !evidenceCarriesSubtype(ev.contentType)) {
+      if (
+        editingSubtype &&
+        body.contentSubtype !== null &&
+        !evidenceCarriesSubtype(effectiveType)
+      ) {
         throw new HttpError(400, "This evidence type doesn't carry a language or interpreter.");
       }
+      // A type change carries the interpreter / language over when the new type
+      // reads one too — a code block's `bash` is a script's `bash`, and the name the
+      // report derives for it goes from `.bash` to `.sh` (only derives: evidence
+      // that arrived as an upload keeps its `originalFilename`, which beats the
+      // type-derived name everywhere, deliberately — a file already listed in a
+      // delivered archive's "Files Attached" table must not be renamed under the
+      // client). When the new type reads none, the column is
+      // cleared rather than left holding a value nothing will ever show again, so a
+      // stale `bash` can't linger invisibly and reappear on a later re-type.
       const subtypePatch = editingSubtype
         ? { contentSubtype: body.contentSubtype?.trim() || null }
-        : undefined;
+        : changingType && !evidenceCarriesSubtype(effectiveType)
+          ? { contentSubtype: null }
+          : undefined;
       let blobPatch:
         { fullBlobKey: string | null; sha256: string | null; sizeBytes: number | null } | undefined;
       if (editingContent) {
@@ -426,7 +535,9 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
         } else {
           // The script cap applies to an edit as well as a create, or a 1 KB script
           // could be grown past it by the very editor the cap exists to protect.
-          if (ev.contentType === 'script' && Buffer.byteLength(text, 'utf8') > MAX_SCRIPT_BYTES) {
+          // Against the resulting type, so a code block cannot be re-typed to a
+          // script and grown past the cap in the same request.
+          if (effectiveType === 'script' && Buffer.byteLength(text, 'utf8') > MAX_SCRIPT_BYTES) {
             throw new HttpError(413, SCRIPT_TOO_LARGE_REASON);
           }
           const buf = Buffer.from(text, 'utf8');
@@ -486,6 +597,13 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
             title: body.title ?? undefined,
             description: body.description ?? undefined,
             occurredAt: body.occurredAt ? new Date(body.occurredAt) : undefined,
+            // Re-label the type, validated above as a move between two text-backed
+            // types. Nothing else moves with it: the blob keys, hash and size stay
+            // as they are, and the content route re-reads this column on every
+            // request, so the MIME it serves — and the download name, where that is
+            // derived from the type rather than taken from `originalFilename` —
+            // follow the new type from the next read on.
+            contentType: body.contentType,
             // Hide from / re-include in every report output; absent leaves it as it is.
             // The evidence itself stays fully visible in the app either way.
             excludeFromReport: body.excludeFromReport,

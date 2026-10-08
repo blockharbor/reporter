@@ -25,10 +25,10 @@ import {
   ErrorState,
   Field,
   Input,
+  MarkdownField,
   Modal,
   SeverityBadge,
   Spinner,
-  Textarea,
   useConfirm,
   useToast,
 } from '@reporter/ui';
@@ -469,12 +469,10 @@ function CreateFindingModal({
           <CategorySelect id="f-cat" slug={slug} value={category} onChange={setCategory} />
         </Field>
         <Field label="Description" htmlFor="f-desc">
-          <Textarea
-            id="f-desc"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={4}
-          />
+          {/* Same field the finding detail page edits, and the report renders it
+              as markdown — so the quick-create form gets the same editor, not a
+              bare textarea that hides the Write/Preview affordance. */}
+          <MarkdownField id="f-desc" rows={4} value={description} onChange={setDescription} />
         </Field>
       </div>
     </Modal>

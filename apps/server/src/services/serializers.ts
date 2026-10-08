@@ -177,8 +177,9 @@ type EvidenceWithRelations = DbEvidence & {
    *  (for `parentEvidenceUuid`) and its report-exclusion flag, which is what makes
    *  inherited exclusion visible to the client (`parentExcludedFromReport`). */
   parent?: Pick<DbEvidence, 'uuid' | 'excludeFromReport'> | null;
-  /** Present when the include counts comments (linked evidence) on this item. */
-  _count?: { comments: number };
+  /** Present when the include counts this item's links: comments (linked evidence)
+   *  and the engagement goals it is attached to. */
+  _count?: { comments: number; goals: number };
   /** The requesting user's pref only (see `evidenceInclude`); powers `starred`. */
   userPrefs?: { isFavorite: boolean }[];
 };
@@ -216,6 +217,7 @@ export function serializeEvidence(e: EvidenceWithRelations, engagementSlug: stri
     hasThumbnail: Boolean(e.thumbBlobKey),
     parentEvidenceUuid: e.parent?.uuid ?? null,
     commentCount: e._count?.comments ?? 0,
+    numGoals: e._count?.goals ?? 0,
     starred: e.userPrefs?.[0]?.isFavorite ?? false,
     excludeFromReport: e.excludeFromReport,
     // The inherited half of report exclusion, resolved server-side: only the server
@@ -364,7 +366,14 @@ export function evidenceInclude(userId: number) {
     // a finding's attached evidence, the evidence pickers — so resolving it here
     // badges the inherited case everywhere at once.
     parent: { select: { uuid: true, excludeFromReport: true } },
-    _count: { select: { comments: true } },
+    // Both link counts come from the one `_count`, which Prisma resolves as
+    // correlated subqueries on the same row — no extra round trip per item, and
+    // `GoalEvidence` is indexed by `evidenceId`, so the goal count is as cheap as
+    // the comment one. Counted here rather than at a call site precisely because
+    // this include is the single source of a serialized evidence row: the Evidence
+    // tab, the detail view, the linked-evidence thread, a finding's attached
+    // evidence and the create/update responses all get `numGoals` from this line.
+    _count: { select: { comments: true, goals: true } },
     userPrefs: { where: { userId }, select: { isFavorite: true } },
   } as const;
 }

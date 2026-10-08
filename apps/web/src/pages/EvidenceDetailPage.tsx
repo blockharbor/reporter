@@ -10,13 +10,21 @@ import {
   Input,
   MarkdownField,
   MarkdownPreview,
+  Select,
   Spinner,
   TagChip,
   TagPicker,
   useConfirm,
   useToast,
 } from '@reporter/ui';
-import { defaultTagColorFor } from '@reporter/shared';
+import {
+  EDITABLE_TEXT_EVIDENCE_TYPES,
+  EVIDENCE_TYPE_LABELS,
+  defaultTagColorFor,
+  evidenceCarriesSubtype,
+  isEditableTextEvidence,
+  type EvidenceType,
+} from '@reporter/shared';
 import {
   useCreateTag,
   useDeleteEvidence,
@@ -49,7 +57,21 @@ interface EvidenceForm {
   title: string;
   description: string;
   tagIds: number[];
+  /** Seeded from the evidence by `startEditDetails`; only sent when it changed. */
+  contentType: EvidenceType;
 }
+
+/**
+ * The permanent hint under the Type control. Code block ↔ script is the whole
+ * reason the two types are distinct, so the line names what actually differs
+ * between them — one body goes through the markdown renderer and the other does
+ * not — rather than saying vaguely that the type "changes how it renders".
+ */
+const TYPE_CHANGE_HINT =
+  `A ${EVIDENCE_TYPE_LABELS.script} prints verbatim in the report; ` +
+  `a ${EVIDENCE_TYPE_LABELS.codeblock} goes through the markdown renderer, where characters ` +
+  `like * and _ turn into formatting. Changing the type leaves the stored text exactly as it ` +
+  `is — only the way it renders changes.`;
 
 export function EvidenceDetailPage() {
   const { slug = '', uuid = '' } = useParams();
@@ -88,7 +110,12 @@ export function EvidenceDetailPage() {
   // Deliberate Details edit: an explicit Edit button seeds a draft; only Save
   // persists it (Cancel discards). Mirrors the Content section's Edit → Save flow.
   const [editingDetails, setEditingDetails] = useState(false);
-  const [draft, setDraft] = useState<EvidenceForm>({ title: '', description: '', tagIds: [] });
+  const [draft, setDraft] = useState<EvidenceForm>({
+    title: '',
+    description: '',
+    tagIds: [],
+    contentType: 'none',
+  });
   const [savingDetails, setSavingDetails] = useState(false);
   const [adding, setAdding] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -111,6 +138,7 @@ export function EvidenceDetailPage() {
       title: evidence.title,
       description: evidence.description,
       tagIds: evidence.tags.map((t) => t.id),
+      contentType: evidence.contentType,
     });
     setEditingDetails(true);
   }
@@ -120,15 +148,32 @@ export function EvidenceDetailPage() {
       toast.error('A title is required.');
       return;
     }
+    // Only sent when it actually changed, so an ordinary title edit doesn't restate
+    // the type — and so evidence whose type can't change (the control isn't offered
+    // for a screenshot or a recording) never names one at all.
+    const typeChanged = evidence !== undefined && draft.contentType !== evidence.contentType;
     setSavingDetails(true);
     try {
       await update.mutateAsync({
         uuid,
-        patch: { title: draft.title.trim(), description: draft.description, tagIds: draft.tagIds },
+        patch: {
+          title: draft.title.trim(),
+          description: draft.description,
+          tagIds: draft.tagIds,
+          ...(typeChanged ? { contentType: draft.contentType } : {}),
+        },
       });
-      toast.success('Details saved');
+      // No indefinite article in front of the label: the offered set includes
+      // "Event" and "HTTP request", so a hard-coded "a" reads as "now a Event".
+      toast.success(
+        typeChanged
+          ? `Details saved — type is now ${EVIDENCE_TYPE_LABELS[draft.contentType]}`
+          : 'Details saved',
+      );
       setEditingDetails(false);
     } catch (err) {
+      // The server's refusal names which side of the change its stored bytes can't
+      // support ("A Screenshot can't change type — …"), so show it as it came.
       toast.error(err instanceof Error ? err.message : 'Could not save details');
     } finally {
       setSavingDetails(false);
@@ -157,6 +202,18 @@ export function EvidenceDetailPage() {
   const isComment = evidence.parentEvidenceUuid !== null;
   const linkedList = linkedEvidence.data ?? [];
   const excludeFromReport = pendingExclude ?? evidence.excludeFromReport;
+  // Re-typing is metadata only, which holds for the text-backed types and nothing
+  // else: a screenshot's bytes are an image and a recording's are an asciicast, so
+  // every option a dropdown could offer one of those would be refused. Same
+  // predicate the server guards with, so the two can't come to disagree.
+  const canChangeType = isEditableTextEvidence(evidence.contentType);
+  // The server clears the language / interpreter when the new type reads none.
+  // Say so while the change is still a draft, rather than letting a recorded value
+  // disappear on Save with nothing having mentioned it.
+  const typeDropsSubtype =
+    evidenceCarriesSubtype(evidence.contentType) &&
+    !evidenceCarriesSubtype(draft.contentType) &&
+    Boolean(evidence.contentSubtype?.trim());
 
   // Attach (parent uuid) / move (new parent uuid) / detach (null) all funnel
   // through one PUT of `parentEvidenceUuid`.
@@ -300,6 +357,59 @@ export function EvidenceDetailPage() {
 
           {editingDetails ? (
             <div className="space-y-4">
+              {/* Type sits first, in the same order the create form asks for it, and
+                  inside this draft so Cancel discards a mistaken change like any
+                  other descriptive field. */}
+              {canChangeType ? (
+                <Field
+                  label="Type"
+                  htmlFor="d-type"
+                  hint={
+                    <>
+                      {TYPE_CHANGE_HINT}
+                      {typeDropsSubtype && (
+                        <span className="mt-1 block">
+                          Saving as {EVIDENCE_TYPE_LABELS[draft.contentType]} also clears the
+                          recorded language or interpreter (
+                          <span className="font-mono">{evidence.contentSubtype}</span>) — that type
+                          doesn’t carry one.
+                        </span>
+                      )}
+                    </>
+                  }
+                >
+                  <Select
+                    id="d-type"
+                    className="max-w-xs"
+                    value={draft.contentType}
+                    onChange={(e) =>
+                      setDraft((f) => ({ ...f, contentType: e.target.value as EvidenceType }))
+                    }
+                  >
+                    {EDITABLE_TEXT_EVIDENCE_TYPES.map((t) => (
+                      <option key={t} value={t}>
+                        {EVIDENCE_TYPE_LABELS[t]}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              ) : (
+                /* No dropdown where every option would be refused — the type reads
+                   as the fixed fact it is, with the reason beside it, so the control
+                   isn't simply missing without explanation. Not a `Field`: there is
+                   no control here for its <label> to name, and the reason matches
+                   the server's refusal wording — a recording's asciicast is text, so
+                   "raw bytes" would be a reason the operator could disprove. */
+                <div className="flex flex-col gap-1.5">
+                  <p className="text-sm font-medium text-text">Type</p>
+                  <p className="text-sm text-text">{EVIDENCE_TYPE_LABELS[evidence.contentType]}</p>
+                  <p className="text-xs text-muted">
+                    What’s stored for a {EVIDENCE_TYPE_LABELS[evidence.contentType]} is a file only
+                    its own viewer reads rather than an editable text body, so its type can’t be
+                    changed.
+                  </p>
+                </div>
+              )}
               <Field
                 label="Title"
                 htmlFor="d-title"

@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useParams } from 'react-router-dom';
 import {
   Badge,
@@ -36,6 +44,8 @@ import {
 } from '../api/hooks.js';
 import { ADMIN_ONLY_TITLE, READ_ONLY_TITLE, useEngagementPermissions } from '../lib/permissions.js';
 import { useAutosave } from '../hooks/useAutosave.js';
+import { DEEP_LINK_HIGHLIGHT, useDeepLinkRow } from '../hooks/useDeepLinkRow.js';
+import { GOAL_PARAM, goalRowId } from '../components/goals/goalDeepLink.js';
 import { SaveStatusIndicator } from '../components/SaveStatusIndicator.js';
 import { ProgressBar } from '../components/goals/ProgressBar.js';
 import { GoalStatusControl } from '../components/goals/GoalStatusControl.js';
@@ -51,6 +61,14 @@ interface CollapseState {
   collapsed: Set<string>;
   toggle: (key: string) => void;
 }
+
+/**
+ * The goal a `?goal=` deep link has just arrived at, so that one row can flash.
+ * A context rather than a prop: the row is three components down (Target →
+ * Activity → Goal) and only the leaf cares, so threading it would put a prop on
+ * two components that never read it.
+ */
+const ArrivedGoalContext = createContext<number | null>(null);
 
 export function GoalsPage() {
   const { slug = '' } = useParams();
@@ -83,6 +101,39 @@ export function GoalsPage() {
   }, [targets]);
   const allCollapsed = allKeys.length > 0 && allKeys.every((k) => collapsed.has(k));
   const collapseState: CollapseState = { collapsed, toggle };
+
+  // `?goal=<id>` (see goalDeepLink.ts) — a "Linked goals" card on a finding or an
+  // evidence item sends the reader here. Expand the goal's Target and Activity
+  // first: both start expanded, but "Collapse all" is one click away, and a reader
+  // who collapsed the tree and then followed a link would otherwise land on a page
+  // with nothing to see.
+  const arrivedRaw = useDeepLinkRow(
+    GOAL_PARAM,
+    (raw) => {
+      if (!/^\d+$/.test(raw)) return null;
+      const id = Number(raw);
+      for (const t of targets) {
+        for (const a of t.activities) {
+          if (!a.goals.some((g) => g.id === id)) continue;
+          return {
+            rowId: goalRowId(id),
+            reveal: () =>
+              setCollapsed((prev) => {
+                const next = new Set(prev);
+                next.delete(`t:${t.id}`);
+                next.delete(`a:${a.id}`);
+                return next;
+              }),
+          };
+        }
+      }
+      // A goal deleted since the link was made: nothing to scroll to, and the
+      // shared hook drops the param so it can't sit in the address bar.
+      return null;
+    },
+    !isLoading && tree !== undefined,
+  );
+  const arrivedGoal = arrivedRaw === null ? null : Number(arrivedRaw);
 
   async function addTarget(name: string) {
     try {
@@ -171,23 +222,28 @@ export function GoalsPage() {
         />
       ) : (
         <div className="space-y-3">
-          <SortableList ids={targets.map((t) => t.id)} onReorder={(ids) => reorderTargets.mutate(ids)}>
-            <div className="space-y-3">
-              {targets.map((target) => (
-                <SortableRow key={target.id} id={target.id} disabled={!canWrite}>
-                  {(handle) => (
-                    <TargetCard
-                      slug={slug}
-                      target={target}
-                      canWrite={canWrite}
-                      handle={handle}
-                      collapse={collapseState}
-                    />
-                  )}
-                </SortableRow>
-              ))}
-            </div>
-          </SortableList>
+          <ArrivedGoalContext.Provider value={arrivedGoal}>
+            <SortableList
+              ids={targets.map((t) => t.id)}
+              onReorder={(ids) => reorderTargets.mutate(ids)}
+            >
+              <div className="space-y-3">
+                {targets.map((target) => (
+                  <SortableRow key={target.id} id={target.id} disabled={!canWrite}>
+                    {(handle) => (
+                      <TargetCard
+                        slug={slug}
+                        target={target}
+                        canWrite={canWrite}
+                        handle={handle}
+                        collapse={collapseState}
+                      />
+                    )}
+                  </SortableRow>
+                ))}
+              </div>
+            </SortableList>
+          </ArrivedGoalContext.Provider>
           <InlineAdd
             label="Add target"
             placeholder="Target name — e.g. Web application"
@@ -277,7 +333,15 @@ function goalCounts(goals: Goal[]): { total: number; complete: number } {
 }
 
 /** A muted "N/M complete" summary chip for a collapsed node. */
-function CountSummary({ prefix, complete, total }: { prefix?: string; complete: number; total: number }) {
+function CountSummary({
+  prefix,
+  complete,
+  total,
+}: {
+  prefix?: string;
+  complete: number;
+  total: number;
+}) {
   return (
     <span className="text-xs font-normal text-muted">
       {prefix}
@@ -394,7 +458,9 @@ function TargetCard({
           ) : (
             <SortableList
               ids={target.activities.map((a) => a.id)}
-              onReorder={(ids) => reorderActivities.mutate({ targetId: target.id, orderedIds: ids })}
+              onReorder={(ids) =>
+                reorderActivities.mutate({ targetId: target.id, orderedIds: ids })
+              }
             >
               <div className="space-y-2">
                 {target.activities.map((activity) => (
@@ -476,7 +542,10 @@ function ActivityBlock({
 
   async function addGoal(title: string) {
     try {
-      await createGoal.mutateAsync({ activityId: activity.id, input: { title, notes: '', isRetest: false } });
+      await createGoal.mutateAsync({
+        activityId: activity.id,
+        input: { title, notes: '', isRetest: false },
+      });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not add goal');
     }
@@ -493,9 +562,7 @@ function ActivityBlock({
             {activity.category && (
               <span className="text-xs font-normal text-muted">· {activity.category}</span>
             )}
-            {!open && (
-              <CountSummary prefix="· " complete={counts.complete} total={counts.total} />
-            )}
+            {!open && <CountSummary prefix="· " complete={counts.complete} total={counts.total} />}
           </p>
         </div>
         {canWrite && (
@@ -574,6 +641,8 @@ function GoalRow({
   const [editing, setEditing] = useState(false);
   const [pickEvidence, setPickEvidence] = useState(false);
   const [pickFinding, setPickFinding] = useState(false);
+  /** This is the goal a `?goal=` deep link just arrived at — flash the row. */
+  const arrived = useContext(ArrivedGoalContext) === goal.id;
 
   async function setStatus(status: Goal['status']) {
     try {
@@ -610,7 +679,12 @@ function GoalRow({
   }
 
   return (
-    <li className="rounded-input border border-border bg-surface p-2.5">
+    <li
+      id={goalRowId(goal.id)}
+      className={`rounded-input border border-border bg-surface p-2.5 transition-colors ${
+        arrived ? DEEP_LINK_HIGHLIGHT : ''
+      }`}
+    >
       <div className="flex items-center gap-2">
         {handle}
         <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -630,8 +704,14 @@ function GoalRow({
               triggerLabel="＋ Link…"
               label={`Link to ${goal.title}`}
               items={[
-                { label: `Link evidence (${goal.numEvidence})`, onSelect: () => setPickEvidence(true) },
-                { label: `Link finding (${goal.numFindings})`, onSelect: () => setPickFinding(true) },
+                {
+                  label: `Link evidence (${goal.numEvidence})`,
+                  onSelect: () => setPickEvidence(true),
+                },
+                {
+                  label: `Link finding (${goal.numFindings})`,
+                  onSelect: () => setPickFinding(true),
+                },
               ]}
             />
             <RowMenu
@@ -739,7 +819,12 @@ function TargetModal({
           <Input id="t-name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
         </Field>
         <Field label="Description" htmlFor="t-desc" hint="Optional">
-          <MarkdownField id="t-desc" rows={3} value={description} onChange={(v) => setDescription(v)} />
+          <MarkdownField
+            id="t-desc"
+            rows={3}
+            value={description}
+            onChange={(v) => setDescription(v)}
+          />
         </Field>
       </div>
     </Modal>
@@ -867,7 +952,12 @@ function GoalModal({
           <Input id="g-title" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
         </Field>
         <Field label="Notes" htmlFor="g-notes" hint="Optional">
-          <Textarea id="g-notes" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          <Textarea
+            id="g-notes"
+            rows={3}
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+          />
         </Field>
         <label className="flex cursor-pointer items-center gap-2 text-sm text-text">
           <input

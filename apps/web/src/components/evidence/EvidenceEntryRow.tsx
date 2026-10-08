@@ -6,6 +6,7 @@ import { evidenceHeading, evidenceSnippet } from '../../lib/evidence-label.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
 import { userDisplayName } from '../../lib/user-display.js';
 import { EvidenceExclusionBadge } from './ExcludedFromReportBadge.js';
+import { GoalCountBadge } from './GoalCountBadge.js';
 import { TimestampRail } from './TimestampRail.js';
 
 /** Per-user star toggle. Rendered as a sibling of the row Link, never inside it. */
@@ -79,6 +80,7 @@ export function EvidenceEntryRow({ slug, ev }: { slug: string; ev: Evidence }) {
                 <span aria-hidden>🔗</span> {ev.commentCount}
               </span>
             )}
+            <GoalCountBadge evidence={ev} />
             {ev.tags.slice(0, 4).map((t) => (
               <TagChip key={t.id} name={t.name} colorName={t.colorName} />
             ))}

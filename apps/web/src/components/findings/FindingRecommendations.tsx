@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Badge,
   Button,
@@ -14,6 +15,7 @@ import {
 } from '@reporter/ui';
 import type { RecommendationItem } from '@reporter/shared';
 import { useEngagement, useUpdateEngagement } from '../../api/hooks.js';
+import { recommendationHref } from '../engagement/ReportContentEditors.js';
 
 /**
  * The strategic recommendations (engagement-level, numbered R1/R2…) linked to a
@@ -21,6 +23,9 @@ import { useEngagement, useUpdateEngagement } from '../../api/hooks.js';
  * existing recommendation, and unlink. Non-admins see the linked list read-only.
  * Strategic recommendations live on the engagement, so edits go through the
  * (admin-gated) engagement update; this keeps them in sync with Reports → Content.
+ *
+ * Each title deep-links to that recommendation in Reports → Content, which is
+ * where its full text is edited (Configure only toggles section visibility).
  */
 export function FindingRecommendations({
   slug,
@@ -131,7 +136,9 @@ export function FindingRecommendations({
       {isLoading ? (
         <Spinner size={18} />
       ) : linked.length === 0 ? (
-        <p className="text-sm text-muted">No strategic recommendations linked to this finding yet.</p>
+        <p className="text-sm text-muted">
+          No strategic recommendations linked to this finding yet.
+        </p>
       ) : (
         <ul className="flex flex-col gap-2">
           {linked.map((r) => (
@@ -140,7 +147,17 @@ export function FindingRecommendations({
                 <div className="min-w-0 flex-1">
                   <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-text">
                     <Badge tone="accent">R{r.number}</Badge>
-                    <span className="min-w-0 break-words">{r.title}</span>
+                    {/* The tooltip names no R-number: the badge beside it already
+                        shows this list's position, and the report numbers only the
+                        recommendations that have a title, so the two disagree while
+                        an untitled draft sits earlier in the list. */}
+                    <Link
+                      to={recommendationHref(slug, r.index)}
+                      title="Open in Reports → Content"
+                      className="min-w-0 break-words rounded text-text hover:text-accent hover:underline"
+                    >
+                      {r.title || '(untitled)'}
+                    </Link>
                   </p>
                   {r.description.trim() && (
                     <div className="mt-1 text-sm text-text">
@@ -227,7 +244,12 @@ export function FindingRecommendations({
             >
               Cancel
             </Button>
-            <Button size="sm" onClick={() => void linkExisting()} loading={saving} disabled={!linkIndex}>
+            <Button
+              size="sm"
+              onClick={() => void linkExisting()}
+              loading={saving}
+              disabled={!linkIndex}
+            >
               Link
             </Button>
           </div>

@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import { Badge, SeverityBadge, Select } from '@reporter/ui';
 import type { Finding } from '@reporter/shared';
 
@@ -6,8 +7,13 @@ import type { Finding } from '@reporter/shared';
  * addresses. Selected findings show as removable chips; a dropdown adds more.
  * Findings are referenced by `uuid`, so a link survives reordering/renaming and a
  * deleted finding surfaces as a removable "Removed finding" chip.
+ *
+ * Each chip's title opens that finding. The three hit areas stay separate so
+ * navigating can't be mistaken for editing: linking happens in the dropdown below,
+ * unlinking on the chip's own ✕, and only the title text is a link.
  */
 export function FindingMultiSelect({
+  slug,
   findings,
   selected,
   onChange,
@@ -15,6 +21,7 @@ export function FindingMultiSelect({
   disabledTitle,
   id,
 }: {
+  slug: string;
   findings: Finding[];
   selected: string[];
   onChange: (uuids: string[]) => void;
@@ -54,7 +61,13 @@ export function FindingMultiSelect({
                   {f ? (
                     <>
                       <SeverityBadge severity={f.severity} className="!px-1.5" />
-                      <span className="max-w-[16rem] truncate text-text">{f.title}</span>
+                      <Link
+                        to={`/engagements/${slug}/findings/${f.uuid}`}
+                        title={`Open “${f.title}”`}
+                        className="max-w-[16rem] truncate rounded text-text hover:text-accent hover:underline"
+                      >
+                        {f.title}
+                      </Link>
                     </>
                   ) : (
                     <Badge tone="warning">Removed finding</Badge>

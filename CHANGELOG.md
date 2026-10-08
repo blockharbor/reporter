@@ -8,6 +8,110 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ## [Unreleased]
 
+### Added
+
+- **An evidence item's type can be changed after capture.** The evidence page's
+  Details card gained a **Type** control beside Title and Description, so a snippet
+  pasted as a `Code block` can be re-typed as a `Script` — the motivating case, now
+  that the two render differently (a script prints verbatim, a code block goes
+  through the markdown renderer). It is part of the same draft as the other
+  descriptive fields, so **Cancel** discards a mistaken change, and a permanent hint
+  under the control names what actually differs between the two. Any text-backed type
+  may become any other — `Code block`, `Script`, `HTTP request`, `Event` and `Note`
+  all store an editable text body — so the stored content is never rewritten and the
+  change is metadata only. A `Screenshot` or a `Terminal recording` can't change type
+  in either direction, because what's stored for them is a file only their own viewer
+  reads — a PNG, an asciicast — rather than a body anyone edits; the server refuses
+  with a message naming the side it couldn't support, and the page prints the type as
+  the fixed fact it is, with the reason, instead of a dropdown whose every option
+  would be rejected. Becoming a `Script` additionally has to satisfy that type's own
+  limits on its bytes — UTF-8 text, no embedded NULs, under 1 MB — which an oversized
+  code block, or one filed from a binary upload, does not: those are refused rather
+  than relabelled into a script the report would print verbatim into a client's PDF.
+  The language / interpreter rides along when the new type reads one too (a `bash`
+  code block becomes a `bash` script, and the name the report derives for it goes from
+  `.bash` to `.sh`; evidence that arrived as an uploaded file keeps that file's own
+  name, as it always has) and is cleared when it does not — which the page says while
+  the change is still a draft, rather than letting a recorded value disappear on save.
+- **A strength can now get its own detail card in the report, not just a table
+  row.** Turning on **Show a detail card for each strength** (Reports → Configure →
+  Detailed Findings) prints a card per strength after the last weakness, numbered
+  `S1`, `S2`, … to match the Summary of Strengths table, so `S2` in one place is `S2`
+  in the other. A card carries what a strength actually has — description, affected
+  target and category — plus Standards Mapping, Attached Evidence and Linked Goals
+  honouring the same sub-items the weakness cards use. The severity-shaped parts are
+  suppressed by kind rather than by emptiness: Impact, Remediation, the attack path,
+  the severity pill and the CVSS/fix-effort line never reach a strength card, so a
+  legacy row still holding a stale rating cannot sneak one in and no heading can
+  print empty. Off — which is the default, so no existing report changes — a strength
+  appears only as a row in that summary table, as it always has.
+- **The Summary of Strengths table now names the goals each strength is linked
+  to**, as a muted `Linked goals:` line inside the existing Description cell rather
+  than a fourth column, in the same order the Scope & Objectives Coverage table uses.
+  A new **Strength linked goals** sub-item under Detailed Findings turns it off. It
+  reads the same goal lookup the detail cards do, and it is kept separate from the
+  per-card blocks: an engagement that opted out of **Show each finding's linked
+  goals** still gets the table line without the cards' goal blocks coming back.
+- **Evidence lists now show how many engagement goals a piece of evidence is
+  linked to.** A compact `◎ 2` badge sits beside the existing linked-items count on
+  the Evidence timeline, the linked-evidence thread, a finding's Attack Path and
+  Attached Evidence cards, and both evidence pickers (select and reparent), with
+  "Linked to 2 goals" on hover. It is a count, not a list — the goals themselves,
+  with their `Target · Activity` context, stay on the evidence detail page, and the
+  count rides along on the row every one of those lists already loads, so no surface
+  pays a request per item. Evidence linked to no goal shows nothing. The report is
+  unchanged.
+- **Every linked item in the app is now a link.** Clicking a strategic
+  recommendation's `R{n}` title on a finding opens it where it is editable — Reports
+  → Content → Strategic recommendations — expanding that panel, scrolling the row
+  into view and briefly highlighting it, then dropping the jump out of the URL so a
+  refresh or Back does not replay it. A linked goal's title (on both the finding and
+  the evidence page) arrives at that goal in the Goals tree the same way, opening its
+  Target and Activity if they were collapsed; a link to something since deleted
+  simply lands on the page, rather than leaving a dead jump in the address bar. A
+  finding chip in the recommendation's **Linked findings** control opens that
+  finding; the chip's `✕` keeps its own hit area, so unlinking and navigating stay
+  distinct targets. All of them are real links — keyboard-reachable, with the app's
+  focus ring.
+- **Three more description fields got the Write/Preview markdown editor** they
+  were missing, so what you type is what the report prints: the Description on the
+  create-finding dialog, an attack-path step's caption, and the desktop capture
+  app's evidence Description (previously a single-line input).
+
+### Changed
+
+- **Markdown now renders in the report wherever it is authored in the app.** Five
+  fields were written in the markdown editor — Write/Preview tabs, "Markdown
+  supported" — but printed verbatim, so `**bold**`, `- lists` and backticks reached
+  the client PDF as their own syntax. They now render: an evidence item's
+  description on the Evidence Timeline, a strength's description in the Summary of
+  Strengths, a strategic recommendation's description, a scope target's description
+  in Scope & Objectives Coverage, and a figure caption taken from an evidence item's
+  description — along with an attack-path step's caption.
+  **This changes the appearance of existing reports**:
+  text that used to print its markup now prints as bold, lists, tables and code
+  spans. Rendered markdown inside a table cell, caption or timeline line inherits
+  that host's own size and colour rather than jumping to body-prose size, so nothing
+  else about those blocks moves. HTML in those fields is escaped, not honoured, as
+  everywhere else in the report. Deliberately left verbatim: every title (finding,
+  strength, recommendation, timeline entry, subsection), which is plain text in the
+  app too — including an evidence title used as a figure caption, which the timeline
+  prints verbatim two sections earlier; the cover, the running header and the
+  watermark; and — the point of the type — a `Script` body, HAR payloads and every
+  other captured blob, which still print exactly as captured.
+- **The Summary of Strengths' new linked-goals line defaults on, so an engagement
+  configured before this release gains it in its next report.** Like a finding's
+  Linked Goals block, a strength's objectives are standard report content you opt
+  _out_ of; turn it off under Reports → Configure → Detailed Findings → **Strength
+  linked goals**.
+
+### Fixed
+
+- Clearing a piece of evidence's language / interpreter by sending an explicit
+  `null` is no longer refused for a type that doesn't carry one. Asking for both at
+  once — "become a `Note` and drop the interpreter" — was an error, even though
+  leaving the field out cleared the column anyway.
+
 ## [0.11.0] - 2026-10-08
 
 ### Added

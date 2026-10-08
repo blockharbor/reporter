@@ -125,6 +125,9 @@ function reportOptionsFromQuery(q: Record<string, string | undefined>): ReportOp
     // Default-true, like the config path's `true` default: a caller that says
     // nothing gets each finding's linked goals and has to opt out explicitly.
     showFindingLinkedGoals: boolParamDefaultTrue(q.showFindingLinkedGoals),
+    // Default-false, like the config path's `false` default: strength detail
+    // cards are extra pages in the deliverable, so they are opted in to.
+    showStrengthDetailCards: boolParam(q.showStrengthDetailCards),
   };
 }
 
@@ -152,6 +155,7 @@ function reportOptionsFromConfig(config: ReportTemplateConfig): ReportOptions {
     showEvidenceOperators: config.showEvidenceOperators,
     numberExecutionSubsections: config.numberExecutionSubsections,
     showFindingLinkedGoals: config.showFindingLinkedGoals,
+    showStrengthDetailCards: config.showStrengthDetailCards,
   };
 }
 
@@ -183,6 +187,7 @@ function reportFor(
       showEvidenceOperators: config.showEvidenceOperators,
       numberExecutionSubsections: config.numberExecutionSubsections,
       showFindingLinkedGoals: config.showFindingLinkedGoals,
+      showStrengthDetailCards: config.showStrengthDetailCards,
     },
     label,
   };

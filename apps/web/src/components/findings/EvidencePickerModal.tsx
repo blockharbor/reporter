@@ -29,6 +29,7 @@ import { formatDateTime } from '../../lib/format.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';
 import { userDisplayName } from '../../lib/user-display.js';
 import { EvidenceExclusionBadge } from '../evidence/ExcludedFromReportBadge.js';
+import { GoalCountBadge } from '../evidence/GoalCountBadge.js';
 
 const EMPTY_QUERY = parseQuery('');
 
@@ -342,6 +343,7 @@ function PickerRow({
                 work, but they need to know it won't appear in the report. */}
             <EvidenceExclusionBadge evidence={ev} />
             <span>{formatDateTime(ev.occurredAt)}</span>
+            <GoalCountBadge evidence={ev} />
             {ev.tags.slice(0, 3).map((t) => (
               <TagChip key={t.id} name={t.name} colorName={t.colorName} />
             ))}
@@ -371,6 +373,7 @@ function PreviewPane({ slug, ev }: { slug: string; ev: Evidence | null }) {
         <EvidenceExclusionBadge evidence={ev} />
         <span>{userDisplayName(ev.operator)}</span>
         <span>{formatDateTime(ev.occurredAt)}</span>
+        <GoalCountBadge evidence={ev} />
       </div>
       {ev.tags.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-1.5">

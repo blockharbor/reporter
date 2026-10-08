@@ -258,6 +258,21 @@ export const reportConfigSchema = z.object({
    */
   showFindingLinkedGoals: z.boolean().default(true),
   /**
+   * Render a detail card per **strength** in Detailed Findings — description,
+   * affected target and category, plus whichever of that section's own sub-items
+   * a strength can fill. Without it a strength appears only as a row in the
+   * Summary of Strengths table, which is all any report has ever shown.
+   *
+   * Defaults to `false`, so no existing report changes: a strength's detail is
+   * extra pages in the deliverable, opted *in* to. It can't be a sub-item of
+   * `detailedFindings` for that reason — a section sub-item is absent-means-shown,
+   * so a new key there would turn the cards on for every engagement at once.
+   *
+   * It is captured by a saved report template automatically, because
+   * `reportTemplateConfigSchema` is derived from this schema with `.omit`.
+   */
+  showStrengthDetailCards: z.boolean().default(false),
+  /**
    * Report-readiness items the author has explicitly marked "Not applicable".
    * Keyed by the readiness item ids (see the web app's report-readiness helper);
    * an N/A item counts as satisfied toward the report's "Ready" status. Stored
@@ -657,6 +672,11 @@ export const evidenceSchema = z.object({
   parentEvidenceUuid: uuidSchema.nullable(),
   /** How many comments (linked evidence) point at this piece of evidence. */
   commentCount: z.number().int().nonnegative(),
+  /** How many engagement goals this evidence is linked to (`GoalEvidence` rows).
+   *  Here so a list can show that the link exists without a per-item request —
+   *  only the detail view loads the goals themselves, with their names and their
+   *  Target · Activity context. */
+  numGoals: z.number().int().nonnegative(),
   /** Whether the requesting user starred this evidence (per-user, like engagement favorites). */
   starred: z.boolean().optional(),
   /** When true this evidence is omitted from every report output — the PDF, the
@@ -986,9 +1006,12 @@ export const updateEvidenceInput = z.object({
    */
   content: z.string().optional(),
   /**
-   * New language / interpreter, or null to clear it. Only valid for the types that
-   * carry one (`evidenceCarriesSubtype`) — the server rejects it for anything else
-   * rather than storing a value nothing will ever read.
+   * New language / interpreter, or null to clear it. A *value* is only valid for
+   * the types that carry one (`evidenceCarriesSubtype`) — the server rejects it for
+   * anything else rather than storing something nothing will ever read. Clearing is
+   * always allowed: a null says there is no interpreter, which every type agrees
+   * with, and refusing it would make "become a Note and drop the interpreter" an
+   * error even though omitting the field clears the column anyway.
    *
    * Bounded here even though `createEvidenceInput.contentSubtype` is not: the
    * create path is fed by capture clients, while this one is an operator typing
@@ -996,6 +1019,27 @@ export const updateEvidenceInput = z.object({
    * most 8 characters.
    */
   contentSubtype: z.string().max(120).nullable().optional(),
+  /**
+   * Re-label the evidence's type — code block ↔ script above all, now that the two
+   * render differently (a code block goes through the markdown renderer, a script
+   * prints verbatim).
+   *
+   * Only the text-backed types may be changed, and in either direction:
+   * `isEditableTextEvidence` (`EVIDENCE_TEXT_EDITABLE`) is that set, and every type
+   * in it stores an editable text body, so the stored content is left untouched and
+   * the change is metadata only. The server refuses a change to *or* from a
+   * screenshot or a terminal recording: what is stored for those is a file only
+   * their own viewer reads — a PNG, an asciicast — not a body anyone edits.
+   *
+   * Not a cosmetic relabel: the type decides how the body renders in the report,
+   * and `contentSubtype` rides along with it — carried over when the new type reads
+   * one too (`evidenceCarriesSubtype`), cleared when it does not. Becoming a
+   * `script` additionally has to satisfy that type's own invariant about its bytes
+   * (UTF-8, no NULs, under `MAX_SCRIPT_BYTES`), which not every text body does: the
+   * server refuses the re-type rather than relabel bytes the report would print as
+   * replacement characters into a client PDF.
+   */
+  contentType: evidenceTypeSchema.optional(),
   /** Hide (true) or re-include (false) this evidence in every report output. */
   excludeFromReport: z.boolean().optional(),
 });

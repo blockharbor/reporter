@@ -652,6 +652,7 @@ export function ReportsPage() {
                                 ) : entry.key === 'detailedFindings' ? (
                                   <DetailedFindingsExtraControls
                                     showLinkedGoals={config.showFindingLinkedGoals}
+                                    showStrengthCards={config.showStrengthDetailCards}
                                     canEdit={canEdit}
                                     enabled={entry.enabled}
                                     onChange={(patch) => setConfig((c) => ({ ...c, ...patch }))}
@@ -1388,47 +1389,78 @@ function ExecutionExtraControls({
 }
 
 /**
- * Detailed-Findings-only control shown at the bottom of that section's expanded
- * panel, below its "Include in this section" sub-items. `showFindingLinkedGoals`
- * is a top-level report-config field rather than an entry in this section's
- * `options` map, so — exactly like the Assessment Execution controls above — it is
- * threaded in here instead of being rendered by the generic sub-item loop.
+ * Detailed-Findings-only controls shown at the bottom of that section's expanded
+ * panel, below its "Include in this section" sub-items. Both are top-level
+ * report-config fields rather than entries in this section's `options` map, so —
+ * exactly like the Assessment Execution controls above — they are threaded in here
+ * instead of being rendered by the generic sub-item loop.
  *
- * It is the one control here that defaults ON: a finding's objectives are standard
- * report content you opt *out* of. The hint names the Target and Activity context
- * line but deliberately promises no goal status, because the report omits it (see
- * `renderFinding` in the server's findings-report service for why).
+ * `showFindingLinkedGoals` is the one control here that defaults ON: a finding's
+ * objectives are standard report content you opt *out* of. Its hint names the Target
+ * and Activity context line but deliberately promises no goal status, because the
+ * report omits it (see `renderFinding` in the server's findings-report service for
+ * why).
+ *
+ * `showStrengthDetailCards` defaults OFF — which is also why it can't be a sub-item:
+ * a sub-item is absent-means-shown, so a new key there would have turned strength
+ * cards on for every engagement at once. Its hint has to carry where a strength
+ * appears without it (a row of the Summary of Strengths table, over in Assessment
+ * Findings) and that the severity-shaped parts above never reach a strength card —
+ * the server drops them by kind, so none of them can print an empty heading.
  */
 function DetailedFindingsExtraControls({
   showLinkedGoals,
+  showStrengthCards,
   canEdit,
   enabled,
   onChange,
 }: {
   showLinkedGoals: boolean;
+  showStrengthCards: boolean;
   canEdit: boolean;
   /** The section itself is enabled; its parts are editable only when it is. */
   enabled: boolean;
   onChange: (patch: Partial<ReportConfig>) => void;
 }) {
   return (
-    <label className="flex cursor-pointer items-start gap-2">
-      <input
-        type="checkbox"
-        checked={showLinkedGoals}
-        onChange={(e) => onChange({ showFindingLinkedGoals: e.target.checked })}
-        disabled={!canEdit || !enabled}
-        aria-label="Show each finding’s linked goals"
-        className="mt-0.5 h-4 w-4 rounded border-border text-accent accent-[var(--accent)] disabled:opacity-50"
-      />
-      <span className="min-w-0">
-        <span className="block text-sm text-text">Show each finding’s linked goals</span>
-        <span className="block text-xs text-muted">
-          Name the engagement goals a finding is linked to, with each goal’s Target and Activity for
-          context.
+    <div className="space-y-2">
+      <label className="flex cursor-pointer items-start gap-2">
+        <input
+          type="checkbox"
+          checked={showLinkedGoals}
+          onChange={(e) => onChange({ showFindingLinkedGoals: e.target.checked })}
+          disabled={!canEdit || !enabled}
+          aria-label="Show each finding’s linked goals"
+          className="mt-0.5 h-4 w-4 rounded border-border text-accent accent-[var(--accent)] disabled:opacity-50"
+        />
+        <span className="min-w-0">
+          <span className="block text-sm text-text">Show each finding’s linked goals</span>
+          <span className="block text-xs text-muted">
+            Name the engagement goals a finding is linked to, with each goal’s Target and Activity
+            for context.
+          </span>
         </span>
-      </span>
-    </label>
+      </label>
+      <label className="flex cursor-pointer items-start gap-2">
+        <input
+          type="checkbox"
+          checked={showStrengthCards}
+          onChange={(e) => onChange({ showStrengthDetailCards: e.target.checked })}
+          disabled={!canEdit || !enabled}
+          aria-label="Show a detail card for each strength"
+          className="mt-0.5 h-4 w-4 rounded border-border text-accent accent-[var(--accent)] disabled:opacity-50"
+        />
+        <span className="min-w-0">
+          <span className="block text-sm text-text">Show a detail card for each strength</span>
+          <span className="block text-xs text-muted">
+            Give every strength its own card after the weaknesses, numbered S1, S2, … to match the
+            Summary of Strengths table — description, affected target and category, plus whichever
+            parts above a strength can fill (Impact, Remediation and the attack path belong to a
+            weakness alone). Off, a strength appears only as a row in that table.
+          </span>
+        </span>
+      </label>
+    </div>
   );
 }
 
