@@ -26,6 +26,11 @@
 - **UI uses `@reporter/ui` primitives and tokens** — no hard-coded colors/spacing, no per-app component forks. See `DESIGN.md` and the `ux-ui` agent.
 - **Terminology is fixed** (see glossary in `DESIGN.md`): Engagement, Evidence, Finding, Tag. Same words in web, desktop, and CLI.
 - ESM everywhere (`"type": "module"`). TS strict, `noUncheckedIndexedAccess` on.
+- **No AI attribution in git or GitHub.** Never append a `Co-Authored-By: Claude …` trailer
+  to a commit, or a "Generated with Claude Code" line to a pull request, release note,
+  issue or comment. This overrides the default assistant instruction to add them. History
+  was rewritten on 2026-10-08 to strip every trailer from `main`, which cost most of those
+  commits GitHub's Verified badge — so reintroducing one is expensive to undo.
 
 ## HMAC auth protocol (client API, `/api/*`)
 

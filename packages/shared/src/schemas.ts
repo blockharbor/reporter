@@ -245,6 +245,19 @@ export const reportConfigSchema = z.object({
    */
   findingGroup: findingGroupingSchema.default('severity'),
   /**
+   * Print, under each weakness in Detailed Findings, the engagement goals that
+   * finding is linked to — the goal title plus its Target · Activity context.
+   *
+   * Defaults to `true`: a finding's objectives are standard report content you
+   * opt *out* of, not a section sub-item you opt in to. So an engagement
+   * configured before this field existed gains the block in its next report —
+   * deliberate, and the one behavior change this flag carries.
+   *
+   * It is captured by a saved report template automatically, because
+   * `reportTemplateConfigSchema` is derived from this schema with `.omit`.
+   */
+  showFindingLinkedGoals: z.boolean().default(true),
+  /**
    * Report-readiness items the author has explicitly marked "Not applicable".
    * Keyed by the readiness item ids (see the web app's report-readiness helper);
    * an N/A item counts as satisfied toward the report's "Ready" status. Stored

@@ -420,6 +420,21 @@ export async function goalRoutes(app: FastifyInstance): Promise<void> {
   const linkedGoalSelect = {
     goal: { include: { activity: { include: { target: true } } } },
   } as const;
+  /**
+   * Target → Activity → Goal position, ids breaking position ties: the same key
+   * order `fetchGoalsTree` walks the tree in, so one artifact's linked goals read
+   * in the same sequence here, in the goals tree, and in the report. Without it
+   * these lists come back in whatever order the join happens to produce.
+   */
+  const linkedGoalOrder: (Prisma.GoalEvidenceOrderByWithRelationInput &
+    Prisma.GoalFindingOrderByWithRelationInput)[] = [
+    { goal: { activity: { target: { position: 'asc' } } } },
+    { goal: { activity: { target: { id: 'asc' } } } },
+    { goal: { activity: { position: 'asc' } } },
+    { goal: { activity: { id: 'asc' } } },
+    { goal: { position: 'asc' } },
+    { goalId: 'asc' },
+  ];
   const toLinkedGoal = (g: {
     id: number;
     title: string;
@@ -445,6 +460,7 @@ export async function goalRoutes(app: FastifyInstance): Promise<void> {
           goal: { activity: { target: { engagementId: eng.id } } },
         },
         include: linkedGoalSelect,
+        orderBy: linkedGoalOrder,
       });
       return links.map((l) => toLinkedGoal(l.goal));
     },
@@ -462,6 +478,7 @@ export async function goalRoutes(app: FastifyInstance): Promise<void> {
           goal: { activity: { target: { engagementId: eng.id } } },
         },
         include: linkedGoalSelect,
+        orderBy: linkedGoalOrder,
       });
       return links.map((l) => toLinkedGoal(l.goal));
     },

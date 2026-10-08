@@ -541,7 +541,8 @@ export const REPORT_SECTION_HINTS: Record<ReportSection, string> = {
   threatModel: 'Threat-model narrative and diagrams (only renders when present).',
   assessmentExecution: 'Hand-authored execution narrative and optional evidence log.',
   scopeCoverage: 'Per-target coverage of activities and goals, with status and linked artifacts.',
-  detailedFindings: 'Full per-weakness detail cards (attack path, evidence, remediation).',
+  detailedFindings:
+    'Full per-weakness detail cards (attack path, evidence, remediation, linked goals).',
   supportingInformation: 'Software tested, test tools used, and files attached.',
   appendix: 'Severity & CVSS reference table.',
 };
@@ -718,7 +719,7 @@ export const REPORT_SECTION_SAMPLE: Record<ReportSection, string> = {
     'Your hand-authored execution subsections — written narratives and activity timelines.',
   scopeCoverage: 'Per-target coverage of activities and goals, with status and linked artifacts.',
   detailedFindings:
-    'A full detail card per weakness: description, impact, standards, remediation, attack path, and evidence.',
+    'A full detail card per weakness: description, impact, standards, remediation, related recommendations, linked goals, attack path, and evidence.',
   supportingInformation: 'Client software tested, test tools used, and files attached.',
   appendix: 'A CVSS v3.1 severity reference table (critical through informational).',
 };

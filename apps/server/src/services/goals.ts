@@ -77,19 +77,35 @@ export async function computeOneEngagementProgress(
 /**
  * The full goals tree for an engagement, serialized to the client shape.
  *
- * `forReport` scopes each goal's evidence tally to evidence the report is allowed
- * to show ({@link REPORT_VISIBLE_EVIDENCE}). Without it a goal whose only evidence
- * is excluded prints "0 / 1" in the Scope & Objectives Coverage table — pointing
- * the reader at an item that appears nowhere in the document. The interactive
- * Goals page omits the flag and keeps the true totals, because excluded evidence
- * stays visible in the app (badged) so it can be un-excluded.
+ * `forReport` scopes each goal's tallies to what the report is allowed to show —
+ * both of them:
+ *
+ * - **Evidence**, to evidence the report may show ({@link
+ *   REPORT_VISIBLE_EVIDENCE}). Without it a goal whose only evidence is excluded
+ *   prints "0 / 1" in the Scope & Objectives Coverage table — pointing the reader
+ *   at an item that appears nowhere in the document.
+ * - **Findings**, to the findings that report gathers. Without it the coverage
+ *   table counted findings the report omits, the same bug class as the evidence
+ *   count above. Which findings those are is the caller's to say — the report
+ *   normally takes only `readyToReport` ones, but passes `includeAllFindings` when
+ *   it is printing every finding — so the two tallies in one cell always answer to
+ *   the same filter the document was built with.
+ *
+ * The interactive Goals page omits the flag and keeps the true totals: a
+ * not-yet-ready finding and excluded evidence both stay visible in the app (the
+ * latter badged, so it can be un-excluded), and the page is where an author goes
+ * to see what is still outstanding.
  */
 export async function fetchGoalsTree(
   app: FastifyInstance,
   engagementId: number,
-  opts: { forReport?: boolean } = {},
+  opts: { forReport?: boolean; includeAllFindings?: boolean } = {},
 ): Promise<Target[]> {
   const evidenceCount = opts.forReport ? { where: { evidence: REPORT_VISIBLE_EVIDENCE } } : true;
+  const findingCount =
+    opts.forReport && !opts.includeAllFindings
+      ? { where: { finding: { readyToReport: true } } }
+      : true;
   const targets = await app.db.engagementTarget.findMany({
     where: { engagementId },
     orderBy: [{ position: 'asc' }, { id: 'asc' }],
@@ -99,7 +115,7 @@ export async function fetchGoalsTree(
         include: {
           goals: {
             orderBy: [{ position: 'asc' }, { id: 'asc' }],
-            include: { _count: { select: { evidence: evidenceCount, findings: true } } },
+            include: { _count: { select: { evidence: evidenceCount, findings: findingCount } } },
           },
         },
       },

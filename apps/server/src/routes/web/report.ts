@@ -122,6 +122,9 @@ function reportOptionsFromQuery(q: Record<string, string | undefined>): ReportOp
     showEvidenceOperators: boolParam(q.showEvidenceOperators),
     // Same shape as the config path's `false` default: unnumbered unless asked.
     numberExecutionSubsections: boolParam(q.numberExecutionSubsections),
+    // Default-true, like the config path's `true` default: a caller that says
+    // nothing gets each finding's linked goals and has to opt out explicitly.
+    showFindingLinkedGoals: boolParamDefaultTrue(q.showFindingLinkedGoals),
   };
 }
 
@@ -148,6 +151,7 @@ function reportOptionsFromConfig(config: ReportTemplateConfig): ReportOptions {
     showEvidenceTimestamps: config.showEvidenceTimestamps,
     showEvidenceOperators: config.showEvidenceOperators,
     numberExecutionSubsections: config.numberExecutionSubsections,
+    showFindingLinkedGoals: config.showFindingLinkedGoals,
   };
 }
 
@@ -178,6 +182,7 @@ function reportFor(
       showEvidenceTimestamps: config.showEvidenceTimestamps,
       showEvidenceOperators: config.showEvidenceOperators,
       numberExecutionSubsections: config.numberExecutionSubsections,
+      showFindingLinkedGoals: config.showFindingLinkedGoals,
     },
     label,
   };

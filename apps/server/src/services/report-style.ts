@@ -323,7 +323,10 @@ table.tbl td.title { color: var(--bh-black); font-weight: 500; }
 .finding-meta .sep { color: var(--stroke-light); margin: 0 8px; }
 .finding h4.sub { font-family: var(--font-cond); font-weight: 700; font-size: 12px; letter-spacing: 0.1em;
                   text-transform: uppercase; color: var(--fg-3); margin: 20px 0 8px; break-after: avoid; }
-/* Recommendations cross-referenced from a finding (Detailed Findings). */
+/* Cross-reference lists under a finding (Detailed Findings): the related
+   recommendations, and the goals the finding is linked to. Phrased so no heading
+   this stylesheet styles is quotable out of it — an absence test for a block
+   should not match a comment in every report's <style>. */
 .rec-links { margin: 0; padding-left: 20px; font-size: 14px; line-height: 1.6; color: var(--fg-1); }
 .rec-links li { margin: 2px 0; }
 .rec-links strong { font-family: var(--font-mono); color: var(--bh-red); font-weight: 700; }

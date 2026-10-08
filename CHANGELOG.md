@@ -10,6 +10,17 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ### Added
 
+- **Each finding in the report now lists the engagement goals it is linked to.**
+  Detailed Findings prints a **Linked Goals** block under each weakness — the goal's
+  title over a muted `Target · Activity` context line, listed in the same order the
+  Scope & Objectives Coverage table uses. A finding with no linked goals prints
+  nothing at all, never a "not linked to any goal" line. A new **Show each finding's
+  linked goals** control under Detailed Findings (Reports → Configure) turns the
+  block off per engagement, and a saved report template carries the choice like the
+  rest of the configuration. The block deliberately omits each goal's status, which
+  the app's finding page does show: status is assessor workflow state, and a goal
+  reading "Not started" beside a confirmed Critical weakness reads as an unfinished
+  assessment in a signed deliverable.
 - **A new `Script` evidence type for full, runnable scripts — distinct from the
   short `Code block` snippet.** A script is captured by typing it into a monospace
   editor or by uploading a file (decoded to UTF-8 and stored as editable text, so
@@ -37,6 +48,11 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ### Changed
 
+- **That Linked Goals block defaults on, so an engagement configured before this
+  release gains it in its next report.** This is a deliberate change to what those
+  reports print: a finding's objectives are standard report content you opt _out_ of,
+  not a section sub-item you opt in to. Turn it off under Reports → Configure →
+  Detailed Findings.
 - **A built-in report type now honours the per-section display choices.** Picking
   "Full report", "Executive summary" or "Findings only" from **Report type**
   previously reset every per-section sub-item to on, because a preset carries no
@@ -51,6 +67,16 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ### Fixed
 
+- The **Scope & Objectives Coverage** table no longer counts findings the report
+  omits. Each goal's `findings / evidence` tally filtered the evidence side to what
+  the report prints but counted _every_ linked finding, so a goal linked to a finding
+  still short of "Ready to report" advertised coverage the document never shows. The
+  interactive Goals page keeps the true totals — it is where an author goes to see
+  what is still outstanding, and a report asked for _every_ finding tallies every
+  finding, so the two always agree.
+- **Linked goals** on an evidence or finding detail view are now listed in the same
+  Target → Activity → Goal order as the goals tree and the report, instead of in
+  whatever order the database returned them.
 - An unrecognized script interpreter no longer becomes the file extension in the
   report ZIP. Free text such as `pyton`, `Bourne Again Shell` or `C#` produced
   `.pyton`, a truncated `.bourneag`, or the plausible-but-wrong `.c`; an interpreter

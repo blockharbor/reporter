@@ -34,6 +34,7 @@ import {
   type FindingGrouping,
   type FindingsExport,
   type FindingKind,
+  type LinkedGoal,
   type FixEffort,
   type ParsedQuery,
   type RecommendationItem,
@@ -179,6 +180,13 @@ export interface ReportOptions {
    * headings it has always had. See {@link renderExecutionNarrative}.
    */
   numberExecutionSubsections?: boolean;
+  /**
+   * Print each weakness's linked engagement goals in Detailed Findings. Omitted
+   * means on, matching the config schema's `true` default, so an options object
+   * built before this field existed renders the block rather than silently
+   * dropping content the configuration asks for. See {@link renderFinding}.
+   */
+  showFindingLinkedGoals?: boolean;
 }
 
 export interface JsonExportOptions extends ReportOptions {
@@ -737,6 +745,74 @@ interface LinkedRecommendation {
 }
 
 /**
+ * One engagement goal a finding is linked to, as Detailed Findings prints it.
+ *
+ * Narrowed from the shared `LinkedGoal` rather than restated, so a rename in the
+ * schema reaches this file: the full shape is the interactive finding page's,
+ * carrying the goal's workflow `status` — which this report never prints, see
+ * {@link renderFinding} — plus an id the report has no use for.
+ */
+type LinkedGoalRef = Pick<LinkedGoal, 'title' | 'targetName' | 'activityName'>;
+
+/**
+ * Map each finding uuid → the engagement goals it is linked to, for the
+ * `showFindingLinkedGoals` block. One query, loaded only when that block will
+ * actually render: nothing else in the report reads these links (Scope &
+ * Objectives Coverage walks the goals tree from the goal side instead), and the
+ * gathered findings carry no goals of their own.
+ *
+ * Rows are ordered by target → activity → goal position, with ids breaking
+ * position ties — exactly how {@link fetchGoalsTree}, and therefore the coverage
+ * table, orders them — so the two surfaces list one finding's goals in the same
+ * sequence instead of in whatever order the join happens to return.
+ */
+async function fetchFindingGoals(
+  app: FastifyInstance,
+  engagementId: number,
+): Promise<Map<string, LinkedGoalRef[]>> {
+  const links = await app.db.goalFinding.findMany({
+    // Both sides are scoped to the engagement, like the interactive
+    // `goals/for-finding` route: the link rows are only ever written within one
+    // engagement, so the goal-side clause is redundant today — but this is the
+    // query whose strings are interpolated into a signed client deliverable, so it
+    // is the last place to rely on that holding.
+    where: {
+      finding: { engagementId },
+      goal: { activity: { target: { engagementId } } },
+    },
+    orderBy: [
+      { goal: { activity: { target: { position: 'asc' } } } },
+      { goal: { activity: { target: { id: 'asc' } } } },
+      { goal: { activity: { position: 'asc' } } },
+      { goal: { activity: { id: 'asc' } } },
+      { goal: { position: 'asc' } },
+      { goalId: 'asc' },
+    ],
+    select: {
+      finding: { select: { uuid: true } },
+      goal: {
+        select: {
+          title: true,
+          activity: { select: { name: true, target: { select: { name: true } } } },
+        },
+      },
+    },
+  });
+
+  const out = new Map<string, LinkedGoalRef[]>();
+  for (const l of links) {
+    const refs = out.get(l.finding.uuid) ?? [];
+    refs.push({
+      title: l.goal.title,
+      targetName: l.goal.activity.target.name,
+      activityName: l.goal.activity.name,
+    });
+    out.set(l.finding.uuid, refs);
+  }
+  return out;
+}
+
+/**
  * Render one weakness's detailed subsection (heading, meta, description, impact,
  * standards mapping, remediation, evidence). `label` is the cross-reference id
  * (e.g. "W1"). `parts` gates the optional sub-blocks (Detailed Findings section
@@ -749,6 +825,7 @@ async function renderFinding(
   budget: Budget,
   parts: FindingParts = ALL_FINDING_PARTS,
   linkedRecs: LinkedRecommendation[] = [],
+  linkedGoals: LinkedGoalRef[] = [],
 ): Promise<string> {
   // Split into the two buckets. `gather` already orders Attack Path first, each
   // bucket by its own position, so filtering preserves the intended order.
@@ -781,6 +858,30 @@ async function renderFinding(
     parts.recommendations && linkedRecs.length > 0
       ? `<h4 class="sub">Related Recommendations</h4><ul class="rec-links">${linkedRecs
           .map((r) => `<li><strong>R${r.num}</strong> — ${esc(r.title)}</li>`)
+          .join('')}</ul>`
+      : '';
+
+  // The engagement goals this finding is linked to: each goal's title over a
+  // muted "Target · Activity" context line, reusing the list shape (and the
+  // `.rec-links` styling) Related Recommendations established just above.
+  //
+  // No goal status, and no Retest chip — a deliberate divergence from the web
+  // finding page, which shows both. Status is assessor *workflow* state: a goal
+  // reading "Not started" printed next to a confirmed Critical weakness in a
+  // signed client deliverable reads as an unfinished assessment rather than as
+  // the internal bookkeeping it is. Please don't "fix" the divergence.
+  //
+  // A finding with no linked goals renders nothing at all — never "Not linked to
+  // any goal". Same rule as the evidence guard below: a deliverable does not
+  // assert an absence (the author may simply not have linked goals yet, and the
+  // block is on by default for every engagement).
+  const goalsHtml =
+    linkedGoals.length > 0
+      ? `<h4 class="sub">Linked Goals</h4><ul class="rec-links">${linkedGoals
+          .map(
+            (g) =>
+              `<li>${esc(g.title)}<br /><span class="muted">${esc(g.targetName)} · ${esc(g.activityName)}</span></li>`,
+          )
           .join('')}</ul>`
       : '';
 
@@ -825,6 +926,7 @@ async function renderFinding(
       ${standardsHtml}
       ${remediationHtml}
       ${recsHtml}
+      ${goalsHtml}
       ${pathHtml}
       ${attachedHtml}
     </div>`;
@@ -1624,11 +1726,25 @@ export async function buildReportHtml(
     : sectionEntries;
 
   // Load the goals tree only when the coverage section is actually enabled.
+  // `includeAllFindings` rides along from the same option `gather` filtered the
+  // findings with, so each goal's finding tally counts exactly the findings this
+  // document prints rather than a filter hardcoded one layer down.
   const wantCoverage = effectiveEntries.some((s) => s.key === 'scopeCoverage' && s.enabled);
   const coverageTargets: Target[] = wantCoverage
-    ? await fetchGoalsTree(app, eng.id, { forReport: true })
+    ? await fetchGoalsTree(app, eng.id, { forReport: true, includeAllFindings: opts.includeAll })
     : [];
   const coverageProgress: EngagementProgress = progressFromTree(coverageTargets);
+
+  // Per-finding linked goals, gated the same way: one query, and only when the
+  // block can actually appear — the report asks for it (omitted means yes, the
+  // schema default) and Detailed Findings is rendering. Keyed by finding uuid,
+  // like `recsByFinding` above.
+  const wantFindingGoals =
+    opts.showFindingLinkedGoals !== false &&
+    effectiveEntries.some((s) => s.key === 'detailedFindings' && s.enabled);
+  const goalsByFinding: Map<string, LinkedGoalRef[]> = wantFindingGoals
+    ? await fetchFindingGoals(app, eng.id)
+    : new Map();
 
   // Section 01 is always Engagement Details; content sections number from 02 in
   // their configured, rendered order, so the TOC never drifts.
@@ -2051,6 +2167,7 @@ export async function buildReportHtml(
                   budget,
                   findingParts,
                   recsByFinding.get(f.uuid) ?? [],
+                  goalsByFinding.get(f.uuid) ?? [],
                 ),
               );
             }

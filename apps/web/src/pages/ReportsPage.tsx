@@ -649,6 +649,13 @@ export function ReportsPage() {
                                     enabled={entry.enabled}
                                     onChange={(patch) => setConfig((c) => ({ ...c, ...patch }))}
                                   />
+                                ) : entry.key === 'detailedFindings' ? (
+                                  <DetailedFindingsExtraControls
+                                    showLinkedGoals={config.showFindingLinkedGoals}
+                                    canEdit={canEdit}
+                                    enabled={entry.enabled}
+                                    onChange={(patch) => setConfig((c) => ({ ...c, ...patch }))}
+                                  />
                                 ) : undefined
                               }
                             />
@@ -1377,6 +1384,51 @@ function ExecutionExtraControls({
         onChange={onChange}
       />
     </div>
+  );
+}
+
+/**
+ * Detailed-Findings-only control shown at the bottom of that section's expanded
+ * panel, below its "Include in this section" sub-items. `showFindingLinkedGoals`
+ * is a top-level report-config field rather than an entry in this section's
+ * `options` map, so — exactly like the Assessment Execution controls above — it is
+ * threaded in here instead of being rendered by the generic sub-item loop.
+ *
+ * It is the one control here that defaults ON: a finding's objectives are standard
+ * report content you opt *out* of. The hint names the Target and Activity context
+ * line but deliberately promises no goal status, because the report omits it (see
+ * `renderFinding` in the server's findings-report service for why).
+ */
+function DetailedFindingsExtraControls({
+  showLinkedGoals,
+  canEdit,
+  enabled,
+  onChange,
+}: {
+  showLinkedGoals: boolean;
+  canEdit: boolean;
+  /** The section itself is enabled; its parts are editable only when it is. */
+  enabled: boolean;
+  onChange: (patch: Partial<ReportConfig>) => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-2">
+      <input
+        type="checkbox"
+        checked={showLinkedGoals}
+        onChange={(e) => onChange({ showFindingLinkedGoals: e.target.checked })}
+        disabled={!canEdit || !enabled}
+        aria-label="Show each finding’s linked goals"
+        className="mt-0.5 h-4 w-4 rounded border-border text-accent accent-[var(--accent)] disabled:opacity-50"
+      />
+      <span className="min-w-0">
+        <span className="block text-sm text-text">Show each finding’s linked goals</span>
+        <span className="block text-xs text-muted">
+          Name the engagement goals a finding is linked to, with each goal’s Target and Activity for
+          context.
+        </span>
+      </span>
+    </label>
   );
 }
 

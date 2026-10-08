@@ -184,3 +184,33 @@ describe('numberExecutionSubsections', () => {
     ).toBe(true);
   });
 });
+
+/*
+ * The finding-linked-goals flag, asserted here alongside the other report-config
+ * defaults. It is the one report option that defaults ON, so the default itself is
+ * the behavior contract: an engagement whose stored config predates the field
+ * (every engagement, the day it ships) gains the block in its next report.
+ */
+describe('showFindingLinkedGoals', () => {
+  it('defaults to true, so a config saved before it existed gains the block', () => {
+    expect(reportConfigSchema.parse({}).showFindingLinkedGoals).toBe(true);
+    // A stored config written before the field — the realistic shape — not just `{}`.
+    expect(
+      reportConfigSchema.parse({ findingGroup: 'category', showEvidenceOperators: true })
+        .showFindingLinkedGoals,
+    ).toBe(true);
+  });
+
+  it('is opted out of explicitly, never by omission', () => {
+    expect(reportConfigSchema.parse({ showFindingLinkedGoals: false }).showFindingLinkedGoals).toBe(
+      false,
+    );
+  });
+
+  it('travels with a report template (derived via .omit, so no restating needed)', () => {
+    expect(reportTemplateConfigSchema.parse({}).showFindingLinkedGoals).toBe(true);
+    expect(
+      reportTemplateConfigSchema.parse({ showFindingLinkedGoals: false }).showFindingLinkedGoals,
+    ).toBe(false);
+  });
+});
