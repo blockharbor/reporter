@@ -8,6 +8,8 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-08
+
 ### Added
 
 - **Each finding in the report now lists the engagement goals it is linked to.**
