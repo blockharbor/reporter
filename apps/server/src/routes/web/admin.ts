@@ -4,6 +4,7 @@ import { z } from 'zod';
 import {
   CANNOT_DELETE_SELF,
   defaultTagColorFor,
+  tagColorNameSchema,
   type AdminEngagement,
   type AdminUser,
 } from '@reporter/shared';
@@ -207,8 +208,11 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/admin/default-tags', { preHandler: adminGuard }, async (req, reply) => {
+    // Palette-constrained like the engagement tag inputs: a DefaultTag is copied
+    // verbatim into every new engagement, so an off-palette value here would seed
+    // every future engagement with a tag that renders as slate.
     const body = z
-      .object({ name: z.string().min(1).max(64), colorName: z.string().optional() })
+      .object({ name: z.string().min(1).max(64), colorName: tagColorNameSchema.optional() })
       .parse(req.body);
     const created = await app.db.defaultTag.create({
       data: { name: body.name, colorName: body.colorName ?? defaultTagColorFor(body.name) },

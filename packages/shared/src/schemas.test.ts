@@ -6,9 +6,15 @@ import {
   reportConfigSchema,
   reportPresetSections,
   reportSectionEntrySchema,
+  createTagInput,
+  mergeTagInput,
+  tagReferences,
+  tagSchema,
   updateEngagementInput,
+  updateTagInput,
 } from './schemas.js';
 import { WATERMARK_MAX_CHARS } from './enums.js';
+import { TAG_COLOR_NAMES } from './tags.js';
 
 describe('recommendationItemSchema', () => {
   it('defaults findingUuids to [] for a legacy recommendation (no links)', () => {
@@ -159,5 +165,84 @@ describe('reportPresetSections', () => {
       { key: 'assessmentExecution', enabled: true, options },
     ]).find((s) => s.key === 'assessmentExecution')!;
     expect(entry.options).not.toBe(options);
+  });
+});
+
+describe('tag inputs', () => {
+  describe('updateTagInput', () => {
+    it('trims the name, so "  alpha  " renames to the same label as "alpha"', () => {
+      expect(updateTagInput.parse({ name: '  alpha  ' }).name).toBe('alpha');
+    });
+
+    it('rejects an empty patch (it used to be an expensive no-op UPDATE)', () => {
+      expect(updateTagInput.safeParse({}).success).toBe(false);
+    });
+
+    it('rejects an empty name, including one that is only whitespace', () => {
+      expect(updateTagInput.safeParse({ name: '' }).success).toBe(false);
+      expect(updateTagInput.safeParse({ name: '   ' }).success).toBe(false);
+    });
+
+    it('rejects a name longer than 64 characters', () => {
+      expect(updateTagInput.safeParse({ name: 'x'.repeat(65) }).success).toBe(false);
+      expect(updateTagInput.safeParse({ name: 'x'.repeat(64) }).success).toBe(true);
+    });
+
+    it('rejects an off-palette colorName', () => {
+      expect(updateTagInput.safeParse({ colorName: 'chartreuse' }).success).toBe(false);
+    });
+
+    it('accepts a name-only patch and a colorName-only patch', () => {
+      expect(updateTagInput.parse({ name: 'omega' })).toEqual({ name: 'omega' });
+      expect(updateTagInput.parse({ colorName: 'teal' })).toEqual({ colorName: 'teal' });
+    });
+  });
+
+  describe('createTagInput', () => {
+    it('accepts every palette name, so nothing the swatch picker can send is rejected', () => {
+      for (const colorName of TAG_COLOR_NAMES) {
+        expect(createTagInput.safeParse({ name: 'alpha', colorName }).success).toBe(true);
+      }
+    });
+
+    it('rejects an off-palette colorName', () => {
+      expect(createTagInput.safeParse({ name: 'alpha', colorName: 'chartreuse' }).success).toBe(
+        false,
+      );
+    });
+  });
+
+  /*
+   * Only the INPUT schemas gained the palette enum. The response schema must keep
+   * accepting whatever is stored: rows written before palette validation existed,
+   * and tags imported through `exportedTagSchema` (whose `colorName` is still a
+   * free string), can hold an off-palette value that `tagColor()` degrades to
+   * slate. Tightening `tagSchema.colorName` to the enum would make every one of
+   * those engagements fail to load — this case is here to stop that.
+   */
+  it('tagSchema still accepts an off-palette colorName on the way out', () => {
+    const parsed = tagSchema.safeParse({ id: 1, name: 'legacy', colorName: 'chartreuse' });
+    expect(parsed.success).toBe(true);
+  });
+
+  describe('mergeTagInput', () => {
+    it('rejects a zero or non-integer target id', () => {
+      expect(mergeTagInput.safeParse({ intoTagId: 0 }).success).toBe(false);
+      expect(mergeTagInput.safeParse({ intoTagId: 1.5 }).success).toBe(false);
+      expect(mergeTagInput.safeParse({ intoTagId: 2 }).success).toBe(true);
+    });
+  });
+
+  describe('tagReferences', () => {
+    it('parses a representative references payload', () => {
+      const refs = {
+        savedQueries: [
+          { id: 3, name: 'Starred CAN', type: 'evidence' },
+          { id: 4, name: 'Open CAN findings', type: 'findings' },
+        ],
+        timelineSections: [{ index: 0, title: 'CAN bus activity' }],
+      };
+      expect(tagReferences.parse(refs)).toEqual(refs);
+    });
   });
 });

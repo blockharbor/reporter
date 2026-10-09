@@ -27,17 +27,21 @@ import type {
   Engagement,
   EngagementImportResult,
   LinkedGoal,
+  MergeTagResult,
   ReportSettings,
   ReportTemplate,
   SavedQuery,
   Tag,
+  TagReferences,
   Target,
+  UnapplyTagResult,
   UpdateActivityInput,
   UpdateEvidenceInput,
   UpdateFindingEvidenceInput,
   UpdateGoalInput,
   UpdateReportSettingsInput,
   UpdateReportTemplateInput,
+  UpdateTagInput,
   UpdateTargetInput,
   User,
 } from '@reporter/shared';
@@ -368,6 +372,31 @@ export const useTags = (slug: string) =>
     queryFn: () => api.get<Tag[]>(`/web/engagements/${slug}/tags`),
   });
 
+/**
+ * Everything a tag edit can move. A tag's NAME is what the timeline chips, the
+ * report's Assessment Execution timeline config and the Goals activity
+ * correlation all read, and its ORDER is what every picker and chip row follows —
+ * so a rename, a merge, an unapply or a reorder invalidates far more than
+ * `['tags', slug]`.
+ */
+function invalidateTagFanout(qc: ReturnType<typeof useQueryClient>, slug: string) {
+  qc.invalidateQueries({ queryKey: ['tags', slug] });
+  qc.invalidateQueries({ queryKey: ['timeline', slug] });
+  qc.invalidateQueries({ queryKey: ['findings', slug] });
+  // The per-item caches render chips too, and the evidence detail page seeds its
+  // editable `tagIds` draft from its cached row. With the app's 10s staleTime a
+  // user who views an item, merges or unapplies its tag in Settings and comes
+  // straight back would otherwise edit a stale draft — and saving it re-applies
+  // the tag the merge just removed.
+  qc.invalidateQueries({ queryKey: ['evidence', slug] });
+  qc.invalidateQueries({ queryKey: ['linked-evidence', slug] });
+  qc.invalidateQueries({ queryKey: ['finding', slug] });
+  // The rename/merge rewrite of `executionNarrative[].timeline.tags` lives on the
+  // engagement row, which the Reports → Content editors read.
+  qc.invalidateQueries({ queryKey: engKey(slug) });
+  qc.invalidateQueries({ queryKey: goalsKey(slug) });
+}
+
 export function useCreateTag(slug: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -379,9 +408,11 @@ export function useCreateTag(slug: string) {
 export function useUpdateTag(slug: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (args: { id: number; patch: Partial<Tag> }) =>
+    // `UpdateTagInput`, not `Partial<Tag>`: the old type let a caller send `id`
+    // and `usageCount`, which the server simply stripped.
+    mutationFn: (args: { id: number; patch: UpdateTagInput }) =>
       api.put<Tag>(`/web/engagements/${slug}/tags/${args.id}`, args.patch),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tags', slug] }),
+    onSuccess: () => invalidateTagFanout(qc, slug),
   });
 }
 
@@ -389,9 +420,52 @@ export function useDeleteTag(slug: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.del(`/web/engagements/${slug}/tags/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tags', slug] }),
+    onSuccess: () => invalidateTagFanout(qc, slug),
   });
 }
+
+/** Persist a new curated order. Body is the FULL ordered id list. */
+export function useReorderTags(slug: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (orderedIds: number[]) =>
+      api.patch(`/web/engagements/${slug}/tags/reorder`, { orderedIds }),
+    // Settled, not just success: the server rejects an order built from a stale
+    // tag list (someone else created or deleted a tag meanwhile), and without a
+    // refetch every later drag on the page would keep sending the same stale list.
+    onSettled: () => invalidateTagFanout(qc, slug),
+  });
+}
+
+/** Merge tag `id` INTO `intoTagId`, then delete it. Irreversible. */
+export function useMergeTags(slug: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { id: number; intoTagId: number }) =>
+      api.post<MergeTagResult>(`/web/engagements/${slug}/tags/${args.id}/merge`, {
+        intoTagId: args.intoTagId,
+      }),
+    onSuccess: () => invalidateTagFanout(qc, slug),
+  });
+}
+
+/** Strip a tag from everything it is applied to, keeping the tag itself. */
+export function useUnapplyTag(slug: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) =>
+      api.post<UnapplyTagResult>(`/web/engagements/${slug}/tags/${id}/unapply`, {}),
+    onSuccess: () => invalidateTagFanout(qc, slug),
+  });
+}
+
+/** By-name references to one tag, fetched only while a rename/merge dialog is open. */
+export const useTagReferences = (slug: string, id: number | null) =>
+  useQuery({
+    queryKey: ['tag-references', slug, id],
+    queryFn: () => api.get<TagReferences>(`/web/engagements/${slug}/tags/${id}/references`),
+    enabled: id !== null,
+  });
 
 // --- Findings ---
 export const useFindings = (slug: string) =>

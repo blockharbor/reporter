@@ -11,7 +11,7 @@ React 19 + Vite 7 SPA. Built output is served by the server at `/`. Talks to `/w
 
 ## Pages (target)
 
-`/login` (+TOTP), `/setup`, `/login/recovery/:code` · `/engagements` · `/engagements/:slug/evidence` (timeline + create-evidence + renderers) · `.../goals` (Target → Activity → Goal tree, objectives narrative, proposal import, goal progress + evidence/finding links) · `/engagements/:slug/findings[/:uuid]` · `.../reports` (report section config + PDF/ZIP/JSON generation) · `.../tags` · `.../queries` · `.../settings` · `/admin/{users,tags,findings}` · `/account/{profile,security,api-keys}`.
+`/login` (+TOTP), `/setup`, `/login/recovery/:code` · `/engagements` · `/engagements/:slug/evidence` (timeline + create-evidence + renderers) · `.../goals` (Target → Activity → Goal tree, objectives narrative, proposal import, goal progress + evidence/finding links) · `/engagements/:slug/findings[/:uuid]` · `.../reports` (report section config + PDF/ZIP/JSON generation) · `.../queries` · `.../settings` (details, members, tag management — `.../tags` redirects here) · `/admin/{users,tags,findings}` · `/account/{profile,security,api-keys}`.
 
 ## Evidence renderers
 

@@ -102,7 +102,11 @@ async function main() {
         'The assessment followed a gray-box methodology aligned to the OWASP Testing Guide and ' +
         'the PTES execution phases: reconnaissance, threat modeling, vulnerability analysis, ' +
         'exploitation, and post-exploitation. Findings are rated on the CVSS v3.1 base scale.',
-      tags: { create: DEFAULT_TAGS.map((t) => ({ name: t.name, colorName: t.colorName })) },
+      // Explicit positions, as the engagement create routes do: the seed list's
+      // order becomes the demo engagement's initial curated tag order.
+      tags: {
+        create: DEFAULT_TAGS.map((t, i) => ({ name: t.name, colorName: t.colorName, position: i })),
+      },
       roles: {
         create: [
           { userId: admin.id, role: 'admin' },

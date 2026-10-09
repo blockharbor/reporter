@@ -728,10 +728,16 @@ async function insertEngagement(
   }
   if (tagByName.size > 0) {
     await tx.tag.createMany({
-      data: [...tagByName].map(([tagName, colorName]) => ({
+      // `tagByName` is a Map, so its iteration order is the file's array order —
+      // which the exporter writes in curated `position` order. The index restores
+      // it without the file needing a `position` field. An older export
+      // (alphabetical array) imports to alphabetical positions, which reads
+      // identically to how it rendered on the source server.
+      data: [...tagByName].map(([tagName, colorName], position) => ({
         engagementId,
         name: tagName,
         colorName,
+        position,
       })),
     });
   }

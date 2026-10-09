@@ -557,7 +557,7 @@ export function CreateEvidenceModal({
             emptyHint={
               canWrite
                 ? 'No tags in this engagement yet — create one below.'
-                : 'No tags in this engagement yet — add some on the Tags tab.'
+                : 'No tags in this engagement yet — add some under Settings → Tags.'
             }
           />
         </Field>

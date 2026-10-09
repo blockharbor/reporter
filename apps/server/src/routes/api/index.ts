@@ -3,6 +3,7 @@ import { createEngagementInput, createTagInput, parseQuery } from '@reporter/sha
 import { HttpError, requireApiAuth, requireEngagementRole } from '../../auth/guards.js';
 import { createEvidence, listEvidence } from '../../services/evidence.js';
 import { serializeEngagement, serializeTag } from '../../services/serializers.js';
+import { TAG_ORDER_BY, nextTagPosition } from '../../services/tags.js';
 import { parsePagination } from '../../helpers/pagination.js';
 import { parseEvidenceRequest } from '../shared-evidence.js';
 import { VERSION } from '../../version.js';
@@ -55,20 +56,38 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         name: input.name,
         projectedEndAt: input.projectedEndAt ? new Date(input.projectedEndAt) : undefined,
         roles: { create: { userId: user.id, role: 'admin' } },
-        tags: { create: defaultTags.map((t) => ({ name: t.name, colorName: t.colorName })) },
+        // Explicit positions, as in the /web create route: the seed list's order
+        // becomes the engagement's initial curated tag order.
+        tags: {
+          create: defaultTags.map((t, i) => ({
+            name: t.name,
+            colorName: t.colorName,
+            position: i,
+          })),
+        },
       },
     });
     return serializeEngagement(eng, { role: 'admin', numUsers: 1, numEvidence: 0 });
   });
 
+  // The HMAC plane's tag surface is list + create, deliberately. Capture clients
+  // (desktop tray, reporter-term) only ever pick a tag or mint one mid-capture —
+  // which is also why POST here is idempotent where /web returns 409. Rename,
+  // merge, bulk-unapply and reorder are NOT exposed: merge and unapply are
+  // irreversible and cross-cutting and belong behind an interactive confirmation
+  // that can show the usage counts and the by-name references, and an API key is
+  // a long-lived credential sitting on an operator's laptop — handing it the power
+  // to strip a tag from every item in an engagement widens the blast radius of a
+  // stolen key for no client benefit. Reorder is a preference for human pickers,
+  // and clients get its benefit for free through the `orderBy` below.
   app.get('/engagements/:slug/tags', { preHandler: requireEngagementRole('read') }, async (req) => {
     const { slug } = req.params as { slug: string };
     const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
     const tags = await app.db.tag.findMany({
       where: { engagementId: eng.id },
-      orderBy: { name: 'asc' },
+      orderBy: TAG_ORDER_BY,
     });
-    return tags.map(serializeTag);
+    return tags.map((t) => serializeTag(t));
   });
 
   app.post(
@@ -83,7 +102,12 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       });
       if (existing) return serializeTag(existing);
       const tag = await app.db.tag.create({
-        data: { engagementId: eng.id, name: input.name, colorName: input.colorName },
+        data: {
+          engagementId: eng.id,
+          name: input.name,
+          colorName: input.colorName,
+          position: await nextTagPosition(app.db, eng.id),
+        },
       });
       return serializeTag(tag);
     },

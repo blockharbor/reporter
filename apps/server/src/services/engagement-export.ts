@@ -112,6 +112,7 @@ import { createHash } from 'node:crypto';
 import archiver from 'archiver';
 import type { FastifyInstance } from 'fastify';
 import type { Engagement as EngagementRow } from '@prisma/client';
+import { TAG_ORDER_BY } from './tags.js';
 import {
   ENGAGEMENT_EXPORT_BLOB_PREFIX,
   ENGAGEMENT_EXPORT_DATA_ENTRY,
@@ -278,9 +279,13 @@ export async function buildEngagementExport(
     queryRows,
     reportRows,
   ] = await Promise.all([
+    // Curated order, so the importer can restore `position` from the array index.
+    // Deliberately NOT a new `position` field on `exportedTagSchema`: array order
+    // already carries it losslessly, which means no new field and no
+    // ENGAGEMENT_EXPORT_VERSION decision.
     app.db.tag.findMany({
       where: { engagementId: eng.id },
-      orderBy: { name: 'asc' },
+      orderBy: TAG_ORDER_BY,
       select: { name: true, colorName: true },
     }),
     // The whole goal tree in one query, each level in its display order — the

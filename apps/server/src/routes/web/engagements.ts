@@ -58,7 +58,16 @@ export async function engagementRoutes(app: FastifyInstance): Promise<void> {
         // startedAt defaults to now(); a projected end is optional at creation.
         projectedEndAt: input.projectedEndAt ? new Date(input.projectedEndAt) : undefined,
         roles: { create: { userId: user.id, role: 'admin' } },
-        tags: { create: defaultTags.map((t) => ({ name: t.name, colorName: t.colorName })) },
+        // Explicit positions: the seed list's own order becomes the engagement's
+        // initial curated tag order (Settings → Tags), instead of every tag sharing
+        // position 0 and ordering by the `name` tiebreak alone.
+        tags: {
+          create: defaultTags.map((t, i) => ({
+            name: t.name,
+            colorName: t.colorName,
+            position: i,
+          })),
+        },
       },
     });
     return serializeEngagement(eng, {

@@ -53,6 +53,7 @@ import { buildEvidenceWhere } from '../helpers/timeline-filter.js';
 import { REPORT_VISIBLE_EVIDENCE } from '../helpers/report-visibility.js';
 import { fetchGoalsTree, progressFromTree } from './goals.js';
 import { getReportSettings } from './report-settings.js';
+import { EVIDENCE_TAG_ORDER_BY } from './tags.js';
 import {
   FONT_LINKS,
   WATERMARK_OPACITY_VALUES,
@@ -1599,7 +1600,7 @@ async function gatherSubsectionTimeline(
     // be un-excluded. Both halves are nested in one `AND` so neither can shadow
     // the other's top-level `OR`.
     where: { AND: [where, REPORT_VISIBLE_EVIDENCE] },
-    include: { tags: { include: { tag: true } }, operator: true },
+    include: { tags: { include: { tag: true }, orderBy: EVIDENCE_TAG_ORDER_BY }, operator: true },
     orderBy: { occurredAt: 'asc' },
   });
   return rows.map((e) => ({
@@ -2248,7 +2249,10 @@ export async function buildReportHtml(
         if (includeTimeline) {
           const evidence = await app.db.evidence.findMany({
             where: { engagementId: eng.id, parentEvidenceId: null, excludeFromReport: false },
-            include: { tags: { include: { tag: true } }, operator: true },
+            include: {
+              tags: { include: { tag: true }, orderBy: EVIDENCE_TAG_ORDER_BY },
+              operator: true,
+            },
             orderBy: { occurredAt: 'asc' },
           });
           const tlItems: TimelineEvidence[] = evidence.map((e) => ({

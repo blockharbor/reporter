@@ -11,6 +11,7 @@ import type {
   TagLite,
 } from '../shared/types.js';
 import { CH } from '../shared/channels.js';
+import type { CreateTagInput } from '@reporter/shared';
 import { getCurrentEngagement, getHotkeys, getSettings, saveSettings } from './settings.js';
 import { addItem, listQueue, removeItem, updateItem } from './queue.js';
 import { makeClient } from './reporter-client.js';
@@ -257,7 +258,10 @@ function registerIpc(): void {
 
   ipcMain.handle(
     CH.createTag,
-    async (_e, slug: string, input: { name: string; colorName: string }): Promise<TagLite> => {
+    // `CreateTagInput`, not a loose `{ name, colorName: string }`: `colorName` is
+    // palette-constrained on the server, and the renderer only ever sends
+    // `defaultTagColorFor(...)`, which is typed to match.
+    async (_e, slug: string, input: CreateTagInput): Promise<TagLite> => {
       const client = makeClient();
       if (!client) throw new Error('Server URL and API key are required.');
       const t = await client.createTag(slug, input);

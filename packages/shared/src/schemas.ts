@@ -23,6 +23,7 @@ import {
   type ReportPreset,
 } from './enums.js';
 import { cvssVectorSchema } from './cvss.js';
+import { TAG_COLOR_NAMES } from './tags.js';
 
 /**
  * Longest slug any route accepts. Exported because the server derives slugs
@@ -615,13 +616,45 @@ export const addEngagementMemberInput = z.object({
 });
 export type AddEngagementMemberInput = z.infer<typeof addEngagementMemberInput>;
 
+/**
+ * A `colorName` restricted to the shared 12-swatch palette. Inputs only — see
+ * `tagSchema.colorName`, which stays a loose string on the way out.
+ */
+export const tagColorNameSchema = z.enum(TAG_COLOR_NAMES);
+
 export const tagSchema = z.object({
   id: z.number().int().positive(),
   name: z.string().min(1).max(64),
+  /**
+   * Loose on purpose: rows predating palette validation (and imported
+   * engagements, whose `exportedTagSchema.colorName` is still a free string) may
+   * hold an off-palette value, which `tagColor()` degrades to `slate`. Inputs are
+   * constrained — see `tagColorNameSchema`.
+   */
   colorName: z.string(),
-  /** How many pieces of evidence carry this tag. Present on list responses;
-   *  drives the "in use" warning when deleting a tag. */
+  /**
+   * Total applications: `evidenceCount + findingCount`. Present on list
+   * responses. Kept as the sum so every existing reader of this field means what
+   * it always meant.
+   */
   usageCount: z.number().int().nonnegative().optional(),
+  /**
+   * How many pieces of evidence carry this tag. Present on the web list response;
+   * drives the delete / merge / unapply blast-radius wording.
+   */
+  evidenceCount: z.number().int().nonnegative().optional(),
+  /**
+   * How many findings carry this tag. Present only once findings can carry tags
+   * (there is no finding↔tag relation before that); readers treat absent as zero.
+   */
+  findingCount: z.number().int().nonnegative().optional(),
+  /**
+   * Names of the Goals activities using this tag as their correlation tag
+   * (`TargetActivity.tagId`). Present on the web list response only; the rename
+   * editor and the merge dialog quote it, because renaming the *activity* later
+   * mints a fresh tag rather than following this one (`ensureActivityTag`).
+   */
+  activityNames: z.array(z.string()).optional(),
 });
 export type Tag = z.infer<typeof tagSchema>;
 
@@ -925,9 +958,73 @@ export type ReorderIdsInput = z.infer<typeof reorderIdsInput>;
 
 export const createTagInput = z.object({
   name: z.string().min(1).max(64),
-  colorName: z.string(),
+  colorName: tagColorNameSchema,
 });
 export type CreateTagInput = z.infer<typeof createTagInput>;
+
+/**
+ * Rename and/or recolor an existing tag. Both fields are optional so the settings
+ * row editor can save a swatch without re-sending the name, and at least one must
+ * be present — an empty body used to be an expensive no-op UPDATE.
+ *
+ * `name` trims here but not in `createTagInput`: tightening create would change
+ * what an already-shipped desktop/CLI payload produces, while a rename is a new
+ * code path, and `"  alpha"` renaming to the same visible label as `"alpha"` is
+ * exactly the collision the 409 pre-check exists to catch.
+ */
+export const updateTagInput = z
+  .object({
+    name: z.string().trim().min(1).max(64).optional(),
+    colorName: tagColorNameSchema.optional(),
+  })
+  .refine((v) => v.name !== undefined || v.colorName !== undefined, {
+    message: 'Provide a name or a colorName',
+  });
+export type UpdateTagInput = z.infer<typeof updateTagInput>;
+
+/** Merge the tag named in the path INTO `intoTagId`, then delete it. */
+export const mergeTagInput = z.object({
+  intoTagId: z.number().int().positive(),
+});
+export type MergeTagInput = z.infer<typeof mergeTagInput>;
+
+/** What a merge actually moved — reported back so the toast can be specific. */
+export const mergeTagResult = z.object({
+  /** The surviving tag, with refreshed counts. */
+  tag: tagSchema,
+  /** Evidence that gained the survivor's chip. */
+  movedEvidence: z.number().int().nonnegative(),
+  /** Evidence that already carried both tags, so nothing was created for it. */
+  evidenceAlreadyTagged: z.number().int().nonnegative(),
+  movedFindings: z.number().int().nonnegative(),
+  findingsAlreadyTagged: z.number().int().nonnegative(),
+  /** Goals activities whose correlation tag was re-pointed at the survivor. */
+  repointedActivities: z.number().int().nonnegative(),
+  /** Assessment Execution timeline subsections whose `tags` array was rewritten. */
+  rewrittenTimelineSections: z.number().int().nonnegative(),
+});
+export type MergeTagResult = z.infer<typeof mergeTagResult>;
+
+/** What a bulk unapply stripped. The tag itself survives. */
+export const unapplyTagResult = z.object({
+  evidenceCleared: z.number().int().nonnegative(),
+  findingsCleared: z.number().int().nonnegative(),
+});
+export type UnapplyTagResult = z.infer<typeof unapplyTagResult>;
+
+/**
+ * Everywhere a tag is addressed by NAME rather than id, so the UI can warn before
+ * a rename or a merge changes that name out from under them. Saved-query strings
+ * are reported but never rewritten (see the server's `services/tags.ts`).
+ */
+export const tagReferences = z.object({
+  savedQueries: z.array(
+    z.object({ id: z.number().int().positive(), name: z.string(), type: savedQueryTypeSchema }),
+  ),
+  /** Assessment Execution timeline subsections naming the tag, by array index. */
+  timelineSections: z.array(z.object({ index: z.number().int().nonnegative(), title: z.string() })),
+});
+export type TagReferences = z.infer<typeof tagReferences>;
 
 /**
  * Metadata for a new piece of evidence. Sent as the JSON `notes` part of the

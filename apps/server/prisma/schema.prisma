@@ -33,7 +33,9 @@ enum SavedQueryType {
   findings
 }
 
-/** Qualitative finding severity, matching the CVSS v3.1 severity rating scale. */
+/**
+ * Qualitative finding severity, matching the CVSS v3.1 severity rating scale.
+ */
 enum Severity {
   none
   low
@@ -42,7 +44,9 @@ enum Severity {
   critical
 }
 
-/** Estimated effort to remediate a finding. */
+/**
+ * Estimated effort to remediate a finding.
+ */
 enum FixEffort {
   none
   low
@@ -50,7 +54,9 @@ enum FixEffort {
   high
 }
 
-/** Whether a finding records a weakness (default) or a security strength. */
+/**
+ * Whether a finding records a weakness (default) or a security strength.
+ */
 enum FindingKind {
   weakness
   strength
@@ -89,16 +95,16 @@ model User {
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
 
-  identities   AuthIdentity[]
-  webauthn     WebauthnCredential[]
-  recovery     RecoveryCode[]
-  apiKeys      ApiKey[]
-  sessions     Session[]
-  roles        UserEngagementRole[]
-  prefs        UserEngagementPref[]
-  evidencePrefs UserEvidencePref[]
-  evidence     Evidence[]         @relation("EvidenceOperator")
-  editedEvidence Evidence[]       @relation("EvidenceLastEditor")
+  identities       AuthIdentity[]
+  webauthn         WebauthnCredential[]
+  recovery         RecoveryCode[]
+  apiKeys          ApiKey[]
+  sessions         Session[]
+  roles            UserEngagementRole[]
+  prefs            UserEngagementPref[]
+  evidencePrefs    UserEvidencePref[]
+  evidence         Evidence[]           @relation("EvidenceOperator")
+  editedEvidence   Evidence[]           @relation("EvidenceLastEditor")
   evidenceComments EvidenceComment[]
   generatedReports GeneratedReport[]
   // Report templates this user saved. SetNull on the far side, so a template
@@ -185,69 +191,69 @@ model Session {
 }
 
 model Engagement {
-  id        Int             @id @default(autoincrement())
-  slug      String          @unique
-  name      String
-  status    EngagementStatus @default(active)
+  id                       Int              @id @default(autoincrement())
+  slug                     String           @unique
+  name                     String
+  status                   EngagementStatus @default(active)
   // Lifecycle dates. `startedAt` defaults to creation time but is editable.
   // `projectedEndAt` is an operator-entered target. `actualEndAt` is stamped when
   // the engagement leaves `active` (into complete/archived) and cleared on return.
-  startedAt      DateTime  @default(now()) @map("started_at")
-  projectedEndAt DateTime? @map("projected_end_at")
-  actualEndAt    DateTime? @map("actual_end_at")
+  startedAt                DateTime         @default(now()) @map("started_at")
+  projectedEndAt           DateTime?        @map("projected_end_at")
+  actualEndAt              DateTime?        @map("actual_end_at")
   // Optional report metadata. Surfaced on the exported findings-report PDF (cover,
   // engagement-details page, executive summary, methodology). All null-until-set.
-  clientName       String? @map("client_name")
-  assessmentType   String? @map("assessment_type")
-  location         String?
-  scope            String?
-  executiveSummary String? @map("executive_summary")
-  methodology      String?
+  clientName               String?          @map("client_name")
+  assessmentType           String?          @map("assessment_type")
+  location                 String?
+  scope                    String?
+  executiveSummary         String?          @map("executive_summary")
+  methodology              String?
   // Per-engagement report watermark, drawn on every page of the exported PDF
   // except the title page. `watermarkText` null → "CONFIDENTIAL"; `watermarkColor`
   // null → a neutral gray. Opacity is one of light|medium|strong; layer is
   // behind|front (under vs. above the page content).
-  watermarkEnabled Boolean @default(true) @map("watermark_enabled")
-  watermarkText    String? @map("watermark_text")
-  watermarkColor   String? @map("watermark_color")
-  watermarkOpacity String  @default("medium") @map("watermark_opacity")
-  watermarkLayer   String  @default("behind") @map("watermark_layer")
+  watermarkEnabled         Boolean          @default(true) @map("watermark_enabled")
+  watermarkText            String?          @map("watermark_text")
+  watermarkColor           String?          @map("watermark_color")
+  watermarkOpacity         String           @default("medium") @map("watermark_opacity")
+  watermarkLayer           String           @default("behind") @map("watermark_layer")
   // Structured report content, all editable in Engagement Settings and rendered
   // into the exported PDF. The list-shaped fields are JSON (jsonb) arrays whose
   // item shapes are validated by zod in @reporter/shared and default to `[]`.
   // `threatModelNarrative` is prose, like `executiveSummary`.
-  scopeTargets             Json    @default("[]") @map("scope_targets")
-  scopeExclusions          Json    @default("[]") @map("scope_exclusions")
-  strategicRecommendations Json    @default("[]") @map("strategic_recommendations")
-  threatModelNarrative     String? @map("threat_model_narrative")
-  threatModelDiagrams      Json    @default("[]") @map("threat_model_diagrams")
-  executionNarrative       Json    @default("[]") @map("execution_narrative")
-  providerContacts         Json    @default("[]") @map("provider_contacts")
-  clientContacts           Json    @default("[]") @map("client_contacts")
-  softwareTested           Json    @default("[]") @map("software_tested")
-  thirdPartySoftware       Json    @default("[]") @map("third_party_software")
+  scopeTargets             Json             @default("[]") @map("scope_targets")
+  scopeExclusions          Json             @default("[]") @map("scope_exclusions")
+  strategicRecommendations Json             @default("[]") @map("strategic_recommendations")
+  threatModelNarrative     String?          @map("threat_model_narrative")
+  threatModelDiagrams      Json             @default("[]") @map("threat_model_diagrams")
+  executionNarrative       Json             @default("[]") @map("execution_narrative")
+  providerContacts         Json             @default("[]") @map("provider_contacts")
+  clientContacts           Json             @default("[]") @map("client_contacts")
+  softwareTested           Json             @default("[]") @map("software_tested")
+  thirdPartySoftware       Json             @default("[]") @map("third_party_software")
   // Test approach (e.g. "Gray Box") and the narrative statement of engagement
   // objectives, both often seeded from an imported proposal. `objectivesNarrative`
   // heads the Goals tab and can also feed the report.
-  testApproach        String? @map("test_approach")
-  objectivesNarrative String? @map("objectives_narrative")
+  testApproach             String?          @map("test_approach")
+  objectivesNarrative      String?          @map("objectives_narrative")
   // Report composition: an ordered, toggleable section list + options driving the
   // exported report (Reports tab). Empty object means "use the canonical default
   // flow"; the shape is validated by reportConfigSchema in @reporter/shared.
-  reportConfig Json @default("{}") @map("report_config")
+  reportConfig             Json             @default("{}") @map("report_config")
   // Raw JSON of the last imported proposal, kept verbatim for provenance/audit.
-  proposalImport Json? @map("proposal_import")
-  createdAt DateTime        @default(now()) @map("created_at")
-  updatedAt DateTime        @updatedAt @map("updated_at")
+  proposalImport           Json?            @map("proposal_import")
+  createdAt                DateTime         @default(now()) @map("created_at")
+  updatedAt                DateTime         @updatedAt @map("updated_at")
 
-  roles       UserEngagementRole[]
-  prefs       UserEngagementPref[]
-  evidence    Evidence[]
-  findings    Finding[]
-  tags        Tag[]
-  categories  FindingCategory[]
-  savedQueries SavedQuery[]
-  targets     EngagementTarget[]
+  roles            UserEngagementRole[]
+  prefs            UserEngagementPref[]
+  evidence         Evidence[]
+  findings         Finding[]
+  tags             Tag[]
+  categories       FindingCategory[]
+  savedQueries     SavedQuery[]
+  targets          EngagementTarget[]
   generatedReports GeneratedReport[]
 
   @@map("engagements")
@@ -350,12 +356,12 @@ model GoalFinding {
 }
 
 model UserEngagementRole {
-  id          Int           @id @default(autoincrement())
-  userId      Int           @map("user_id")
-  engagementId Int           @map("engagement_id")
-  role        EngagementRole
+  id           Int            @id @default(autoincrement())
+  userId       Int            @map("user_id")
+  engagementId Int            @map("engagement_id")
+  role         EngagementRole
 
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   engagement Engagement @relation(fields: [engagementId], references: [id], onDelete: Cascade)
 
   @@unique([userId, engagementId])
@@ -364,12 +370,12 @@ model UserEngagementRole {
 }
 
 model UserEngagementPref {
-  id          Int     @id @default(autoincrement())
-  userId      Int     @map("user_id")
+  id           Int     @id @default(autoincrement())
+  userId       Int     @map("user_id")
   engagementId Int     @map("engagement_id")
-  isFavorite  Boolean @default(false) @map("is_favorite")
+  isFavorite   Boolean @default(false) @map("is_favorite")
 
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   engagement Engagement @relation(fields: [engagementId], references: [id], onDelete: Cascade)
 
   @@unique([userId, engagementId])
@@ -389,18 +395,29 @@ model UserEvidencePref {
   @@map("user_evidence_prefs")
 }
 
+/// An engagement-scoped colored label, applied to evidence (`EvidenceTag`) and
+/// used as an activity's correlation tag (`TargetActivity.tagId`).
+///
+/// `position` is the curated order the tag appears in everywhere a human picks or
+/// reads one — the Settings list, every picker, the chips on an evidence row — set
+/// by drag-and-drop in Settings → Tags. Ties fall back to `name`, which is the
+/// order tags had before the column existed, so an engagement nobody has reordered
+/// still reads alphabetically. `name` is unique per engagement; it is also how tags
+/// are addressed by the `tag:` query language, saved queries and the report's
+/// timeline config, which is why renaming one is not a free operation.
 model Tag {
-  id          Int    @id @default(autoincrement())
+  id           Int    @id @default(autoincrement())
   engagementId Int    @map("engagement_id")
-  name        String
-  colorName   String @map("color_name")
+  name         String
+  colorName    String @map("color_name")
+  position     Int    @default(0)
 
-  engagement Engagement     @relation(fields: [engagementId], references: [id], onDelete: Cascade)
-  evidence  EvidenceTag[]
+  engagement Engagement       @relation(fields: [engagementId], references: [id], onDelete: Cascade)
+  evidence   EvidenceTag[]
   activities TargetActivity[]
 
   @@unique([engagementId, name])
-  @@index([engagementId])
+  @@index([engagementId, position])
   @@map("tags")
 }
 
@@ -431,14 +448,12 @@ model ReportSettings {
 
 /**
  * A named, reusable report configuration — a **report template**.
- *
  * Global on purpose, not engagement-scoped: the library is site-wide so a
  * teammate on any engagement can produce the same kind of report. In lifecycle
  * this is closest to `DefaultTag` (a flat, named, site-wide list); in permissions
  * it is deliberately not admin-only — managing a template needs `write`/`admin`
  * on at least one engagement, or site admin, while listing/applying/generating
  * with one needs only authentication (see `requireReportTemplateManager`).
- *
  * `config` holds a `reportTemplateConfigSchema` payload (@reporter/shared): the
  * engagement's whole `reportConfig` *except* `readinessNa`. That absence is
  * deliberate — readiness waivers record which checklist items one engagement
@@ -446,7 +461,6 @@ model ReportSettings {
  * reporting choice, so a template neither captures them nor touches them when it
  * is applied. The column is re-parsed through that schema on read, so a row from
  * an older build (or edited by hand) can't emit a shape the client doesn't expect.
- *
  * `name` is unique site-wide: it is how a template is referred to in the Reports
  * tab, so two identically-named ones would be indistinguishable. `createdBy` is
  * SetNull, which keeps the template alive when its author is hard-deleted.
@@ -475,7 +489,6 @@ model ReportTemplate {
  * attestation letter issued later stays consistent with the report even after the
  * engagement's findings change, and `blobKey` plus
  * `filename`/`sizeBytes`/`contentType`/`sha256` describe the stored artifact.
- *
  * Those bytes are immutable by design: nothing rewrites or re-renders a stored
  * artifact, so each one keeps the content — and the report exclusions — that were
  * in force when it was generated. Three things point at them and an edit in place
@@ -518,60 +531,62 @@ model GeneratedReport {
 }
 
 model Evidence {
-  id             Int      @id @default(autoincrement())
-  uuid           String   @unique @default(uuid())
-  engagementId    Int      @map("engagement_id")
+  id                Int      @id @default(autoincrement())
+  uuid              String   @unique @default(uuid())
+  engagementId      Int      @map("engagement_id")
   // Who captured this evidence. Null means that user was deleted: the evidence is
   // the client deliverable and outlives its author, so the row survives the delete
   // (ON DELETE SET NULL) and every display site renders "Deleted user".
-  operatorId     Int?     @map("operator_id")
+  operatorId        Int?     @map("operator_id")
   // Short label for the evidence — the primary heading in lists, cards, and the
   // report. Backfilled from the old description on the title migration; required
   // on new evidence at the API/UI layer.
-  title          String   @default("")
-  description    String   @default("")
-  contentType    String   @map("content_type")
-  contentSubtype String?  @map("content_subtype")
+  title             String   @default("")
+  description       String   @default("")
+  contentType       String   @map("content_type")
+  contentSubtype    String?  @map("content_subtype")
   // Original uploaded filename, when known. Used to name files in the report's
   // supporting-files ZIP bundle and the "Files Attached" table; synthesized from
   // the description + content type when absent (older evidence).
-  originalFilename String? @map("original_filename")
-  fullBlobKey    String?  @map("full_blob_key")
-  thumbBlobKey   String?  @map("thumb_blob_key")
+  originalFilename  String?  @map("original_filename")
+  fullBlobKey       String?  @map("full_blob_key")
+  thumbBlobKey      String?  @map("thumb_blob_key")
   // SHA-256 (hex) and byte size of the stored blob, computed once at upload. Lets
   // the report's supporting-files table list hashes/sizes without re-reading every
   // blob on each export. Null for evidence created before this existed (the report
   // then falls back to hashing the blob on demand).
-  sha256         String?  @map("sha256")
-  sizeBytes      Int?     @map("size_bytes")
+  sha256            String?  @map("sha256")
+  sizeBytes         Int?     @map("size_bytes")
   // When set, this evidence is a comment (linked evidence) on another piece of
   // evidence. Enforced one level deep in the service layer. SetNull so deleting
   // a parent orphans its comments into top-level evidence rather than erroring;
   // the web delete handler offers an explicit cascade instead.
-  parentEvidenceId Int?   @map("parent_evidence_id")
-  occurredAt     DateTime @map("occurred_at")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  parentEvidenceId  Int?     @map("parent_evidence_id")
+  occurredAt        DateTime @map("occurred_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
   // Who last edited any field of this evidence (null until first edit). Distinct
   // from `operatorId`, which is always the original capturer.
-  lastEditedById Int?     @map("last_edited_by_id")
-  /** When true this evidence is omitted from every report output — the PDF, the
-      supporting-files ZIP and the JSON export. It stays fully visible in the app. */
-  excludeFromReport Boolean @default(false) @map("exclude_from_report")
+  lastEditedById    Int?     @map("last_edited_by_id")
+  /**
+   * When true this evidence is omitted from every report output — the PDF, the
+   * supporting-files ZIP and the JSON export. It stays fully visible in the app.
+   */
+  excludeFromReport Boolean  @default(false) @map("exclude_from_report")
 
-  engagement Engagement          @relation(fields: [engagementId], references: [id], onDelete: Cascade)
-  operator  User?              @relation("EvidenceOperator", fields: [operatorId], references: [id], onDelete: SetNull)
-  lastEditedBy User?            @relation("EvidenceLastEditor", fields: [lastEditedById], references: [id], onDelete: SetNull)
-  parent    Evidence?          @relation("EvidenceComments", fields: [parentEvidenceId], references: [id], onDelete: SetNull)
-  comments  Evidence[]         @relation("EvidenceComments")
+  engagement    Engagement         @relation(fields: [engagementId], references: [id], onDelete: Cascade)
+  operator      User?              @relation("EvidenceOperator", fields: [operatorId], references: [id], onDelete: SetNull)
+  lastEditedBy  User?              @relation("EvidenceLastEditor", fields: [lastEditedById], references: [id], onDelete: SetNull)
+  parent        Evidence?          @relation("EvidenceComments", fields: [parentEvidenceId], references: [id], onDelete: SetNull)
+  comments      Evidence[]         @relation("EvidenceComments")
   // Plain-text discussion comments (the user-facing "Comments"), distinct from the
   // `comments` self-relation above which models linked evidence.
   commentThread EvidenceComment[]
-  tags      EvidenceTag[]
-  findings  EvidenceFinding[]
-  metadata  EvidenceMetadata[]
-  userPrefs UserEvidencePref[]
-  goals     GoalEvidence[]
+  tags          EvidenceTag[]
+  findings      EvidenceFinding[]
+  metadata      EvidenceMetadata[]
+  userPrefs     UserEvidencePref[]
+  goals         GoalEvidence[]
 
   @@index([engagementId, occurredAt])
   @@index([parentEvidenceId])
@@ -628,38 +643,52 @@ model FindingCategory {
 }
 
 model Finding {
-  id            Int       @id @default(autoincrement())
-  uuid          String    @unique @default(uuid())
-  engagementId  Int       @map("engagement_id")
-  categoryId    Int?      @map("category_id")
-  title         String
-  description   String    @default("")
-  /** Whether this finding is a weakness (default) or a security strength. */
-  kind          FindingKind @default(weakness)
-  /** System/component the finding applies to (e.g. a subsystem or host). */
-  affectedTarget String   @default("") @map("affected_target")
-  /** Business/technical impact if exploited — distinct from the description. */
-  impact        String    @default("")
-  /** Estimated remediation effort (weaknesses only). */
-  fixEffort     FixEffort @default(none) @map("fix_effort")
-  /** Recommended remediation / fix guidance, shown per-finding in the report. */
-  remediation   String    @default("")
-  /** Mapped ISO/SAE 21434 work-product/clause reference IDs (catalog in @reporter/shared). */
-  iso21434Refs  Json      @default("[]") @map("iso21434_refs")
-  /** Mapped UN R155 requirement reference IDs (catalog in @reporter/shared). */
-  unr155Refs    Json      @default("[]") @map("unr155_refs")
-  severity      Severity?
-  cvssVector    String?   @map("cvss_vector")
-  cvssScore     Float?    @map("cvss_score")
-  position      Int       @default(0)
-  readyToReport Boolean   @default(false) @map("ready_to_report")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  id             Int         @id @default(autoincrement())
+  uuid           String      @unique @default(uuid())
+  engagementId   Int         @map("engagement_id")
+  categoryId     Int?        @map("category_id")
+  title          String
+  description    String      @default("")
+  /**
+   * Whether this finding is a weakness (default) or a security strength.
+   */
+  kind           FindingKind @default(weakness)
+  /**
+   * System/component the finding applies to (e.g. a subsystem or host).
+   */
+  affectedTarget String      @default("") @map("affected_target")
+  /**
+   * Business/technical impact if exploited — distinct from the description.
+   */
+  impact         String      @default("")
+  /**
+   * Estimated remediation effort (weaknesses only).
+   */
+  fixEffort      FixEffort   @default(none) @map("fix_effort")
+  /**
+   * Recommended remediation / fix guidance, shown per-finding in the report.
+   */
+  remediation    String      @default("")
+  /**
+   * Mapped ISO/SAE 21434 work-product/clause reference IDs (catalog in @reporter/shared).
+   */
+  iso21434Refs   Json        @default("[]") @map("iso21434_refs")
+  /**
+   * Mapped UN R155 requirement reference IDs (catalog in @reporter/shared).
+   */
+  unr155Refs     Json        @default("[]") @map("unr155_refs")
+  severity       Severity?
+  cvssVector     String?     @map("cvss_vector")
+  cvssScore      Float?      @map("cvss_score")
+  position       Int         @default(0)
+  readyToReport  Boolean     @default(false) @map("ready_to_report")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
 
-  engagement Engagement         @relation(fields: [engagementId], references: [id], onDelete: Cascade)
-  category  FindingCategory?  @relation(fields: [categoryId], references: [id])
-  evidence  EvidenceFinding[]
-  goals     GoalFinding[]
+  engagement Engagement        @relation(fields: [engagementId], references: [id], onDelete: Cascade)
+  category   FindingCategory?  @relation(fields: [categoryId], references: [id])
+  evidence   EvidenceFinding[]
+  goals      GoalFinding[]
 
   @@index([engagementId, position])
   @@map("findings")
@@ -693,11 +722,11 @@ model EvidenceFinding {
 }
 
 model SavedQuery {
-  id          Int            @id @default(autoincrement())
+  id           Int            @id @default(autoincrement())
   engagementId Int            @map("engagement_id")
-  name        String
-  query       String
-  type        SavedQueryType
+  name         String
+  query        String
+  type         SavedQueryType
 
   engagement Engagement @relation(fields: [engagementId], references: [id], onDelete: Cascade)
 

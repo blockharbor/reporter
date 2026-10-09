@@ -15,7 +15,7 @@ export interface TagColor {
   fg: string;
 }
 
-export const TAG_COLORS: readonly TagColor[] = [
+export const TAG_COLORS = [
   { name: 'red', light: '#e05252', dark: '#f0716b', fg: '#ffffff' },
   { name: 'orange', light: '#d9822b', dark: '#f0a04b', fg: '#1a1204' },
   { name: 'amber', light: '#c99a00', dark: '#e5bd3a', fg: '#1a1400' },
@@ -28,19 +28,35 @@ export const TAG_COLORS: readonly TagColor[] = [
   { name: 'pink', light: '#d64f9b', dark: '#f083bd', fg: '#ffffff' },
   { name: 'slate', light: '#5b6472', dark: '#8b95a5', fg: '#ffffff' },
   { name: 'stone', light: '#8a8078', dark: '#b0a79e', fg: '#1a1512' },
-] as const;
+] as const satisfies readonly TagColor[];
 
-export const TAG_COLOR_NAMES = TAG_COLORS.map((c) => c.name);
+/** One of the twelve palette names. */
+export type TagColorName = (typeof TAG_COLORS)[number]['name'];
 
-const TAG_COLOR_BY_NAME = new Map(TAG_COLORS.map((c) => [c.name, c]));
+/**
+ * Every stored `colorName` value. A non-empty readonly tuple rather than
+ * `string[]`, so the input schemas in `schemas.ts` can constrain `colorName` with
+ * `z.enum` (`tagColorNameSchema`). Before that, any string persisted and silently
+ * rendered as `slate` via {@link tagColor}'s fallback.
+ */
+export const TAG_COLOR_NAMES = TAG_COLORS.map((c) => c.name) as [TagColorName, ...TagColorName[]];
+
+/** Keyed by plain `string` on purpose: {@link tagColor} must accept legacy and
+ *  imported rows whose `colorName` is off-palette, and degrade them. */
+const TAG_COLOR_BY_NAME = new Map<string, TagColor>(TAG_COLORS.map((c) => [c.name, c]));
 
 /** Look up a color by stored name, falling back to `slate` for unknown values. */
 export function tagColor(name: string): TagColor {
   return TAG_COLOR_BY_NAME.get(name) ?? TAG_COLORS[10]!;
 }
 
-/** Deterministically pick a palette color for a tag name (used for auto-coloring). */
-export function defaultTagColorFor(tagName: string): string {
+/**
+ * Deterministically pick a palette color for a tag name (used for auto-coloring).
+ * Typed as a palette name, not `string`: every inline-create path (desktop tray,
+ * `reporter-term`, the web pickers) sends this straight into `createTagInput`,
+ * whose `colorName` is palette-constrained.
+ */
+export function defaultTagColorFor(tagName: string): TagColorName {
   let hash = 0;
   for (let i = 0; i < tagName.length; i++) {
     hash = (hash * 31 + tagName.charCodeAt(i)) >>> 0;

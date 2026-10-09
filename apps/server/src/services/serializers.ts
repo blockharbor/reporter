@@ -12,6 +12,7 @@ import type {
   Tag as DbTag,
   User as DbUser,
 } from '@prisma/client';
+import { EVIDENCE_TAG_ORDER_BY } from './tags.js';
 import {
   recommendationItemSchema,
   reportConfigSchema,
@@ -125,8 +126,18 @@ export function serializeApiKey(k: DbApiKey): ApiKey {
   };
 }
 
-export function serializeTag(t: DbTag, usageCount?: number): Tag {
-  return { id: t.id, name: t.name, colorName: t.colorName, usageCount };
+/**
+ * `usageCount` stays the positional second argument (every existing caller passes
+ * it that way, or omits it). The third bag carries the split counts and the
+ * activity hint, which only the web list route has the data for. `position` is
+ * deliberately not on the wire: the array order IS the order.
+ */
+export function serializeTag(
+  t: DbTag,
+  usageCount?: number,
+  extra?: Pick<Tag, 'evidenceCount' | 'findingCount' | 'activityNames'>,
+): Tag {
+  return { id: t.id, name: t.name, colorName: t.colorName, usageCount, ...extra };
 }
 
 export function serializeReportSettings(s: DbReportSettings): ReportSettings {
@@ -358,7 +369,11 @@ export function evidenceInclude(userId: number) {
   return {
     operator: { select: { slug: true, firstName: true, lastName: true } },
     lastEditedBy: { select: { slug: true, firstName: true, lastName: true } },
-    tags: { include: { tag: true } },
+    // Tag chips follow the engagement's curated tag order (Settings → Tags), so a
+    // tag pinned to the top of the list reads first on every evidence row, in the
+    // detail view, in a finding's attached evidence, and in the pickers — all of
+    // which come through this one include.
+    tags: { include: { tag: true }, orderBy: EVIDENCE_TAG_ORDER_BY },
     // Comment-linking: the parent (for `parentEvidenceUuid`) and the count of
     // comments pointing at this item (for `commentCount`). The parent's
     // `excludeFromReport` rides along because report exclusion is inherited, and

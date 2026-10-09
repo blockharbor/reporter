@@ -8,6 +8,41 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ## [Unreleased]
 
+### Added
+
+- **Tags are now fully manageable in an engagement's settings — renamed,
+  recolored, reordered, merged, and stripped from everything at once.** Settings →
+  Tags could only create and delete; the rename endpoint and its client hook had
+  been sitting in the tree with no caller and no test since they were written. The
+  tag list is now a reorderable list rather than a chip cloud: each row has an
+  inline editor for its name and the same twelve-swatch palette the new-tag form
+  uses, a drag handle, a **Pin to top** shortcut, and buttons for the two new bulk
+  operations. Order is persisted on the tag itself (a new `position` column,
+  backfilled from the old alphabetical ordering so every existing engagement's
+  list reads exactly as it did before the upgrade), and every surface that shows a
+  tag follows it — the pickers in the web app, the chips on an evidence row and in
+  the detail view, the desktop tray's Compose picker, `reporter-term`'s selection
+  list, and the tag chips in the report's Assessment Execution timeline. **Merge**
+  folds one tag into another across every item that carries either, keeping a
+  single chip on items that carried both, moving a Goals activity's correlation
+  onto the survivor, and then deleting the tag it absorbed. **Unapply** strips a
+  tag from everything without deleting the tag, for the case where a label was
+  applied too broadly. Both are irreversible, so both state the blast radius first
+  and list the places that address the tag by _name_: the report's timeline
+  sections, which are rewritten automatically, and the saved queries, which are
+  not, because a saved query is a string a person wrote and re-canonicalizing it
+  could quietly change what it matches. Renaming a tag onto a name already in use
+  now answers 409 instead of the `Internal server error` it used to produce,
+  `colorName` is validated against the shared palette in all three places it was
+  an open string (an off-palette value used to persist and silently render as
+  grey), and the tag routes have integration tests for the first time. The HMAC
+  client API keeps its list-and-create-only tag surface deliberately: capture
+  clients only ever pick a tag or mint one mid-capture, and an irreversible bulk
+  operation belongs behind an interactive confirmation rather than a long-lived
+  key on an operator's laptop. The usage counts the confirmations quote are
+  already split into evidence and findings on the wire, so that the finding half
+  can light up without another format change once findings carry tags.
+
 ### Changed
 
 - **The page is wider: 1320px of content, up from 1120px.** The app shell was

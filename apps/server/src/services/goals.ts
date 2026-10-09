@@ -13,6 +13,7 @@ import {
   type Target,
 } from '@reporter/shared';
 import { REPORT_VISIBLE_EVIDENCE } from '../helpers/report-visibility.js';
+import { nextTagPosition } from './tags.js';
 
 export function emptyProgress(): EngagementProgress {
   return { total: 0, complete: 0, inProgress: 0, notStarted: 0, notApplicable: 0, percent: 0 };
@@ -168,9 +169,12 @@ export async function ensureActivityTag(
 ): Promise<number | null> {
   const name = activityName.trim().slice(0, 64);
   if (!name) return null;
+  // A freshly minted tag lands at the end of the engagement's curated order; the
+  // position is only read on create (the upsert's `update` is empty).
+  const position = await nextTagPosition(db, engagementId);
   const tag = await db.tag.upsert({
     where: { engagementId_name: { engagementId, name } },
-    create: { engagementId, name, colorName: defaultTagColorFor(name) },
+    create: { engagementId, name, colorName: defaultTagColorFor(name), position },
     update: {},
   });
   return tag.id;
