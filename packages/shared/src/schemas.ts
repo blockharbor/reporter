@@ -260,8 +260,10 @@ export const reportConfigSchema = z.object({
   /**
    * Render a detail card per **strength** in Detailed Findings — description,
    * affected target and category, plus whichever of that section's own sub-items
-   * a strength can fill. Without it a strength appears only as a row in the
-   * Summary of Strengths table, which is all any report has ever shown.
+   * a strength can fill, including its ordered, captioned steps (printed under
+   * `Steps Taken` rather than `Attack Path`, which would assert an exploitation).
+   * Without it a strength appears only as a row in the Summary of Strengths
+   * table, which is all any report has ever shown.
    *
    * Defaults to `false`, so no existing report changes: a strength's detail is
    * extra pages in the deliverable, opted *in* to. It can't be a sub-item of

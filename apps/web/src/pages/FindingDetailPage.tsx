@@ -447,6 +447,10 @@ export function FindingDetailPage() {
         items={pathItems}
         onAddStep={() => setPickerTarget('path')}
         canWrite={canWrite}
+        // Follows the *draft* kind, like the severity and remediation blocks above:
+        // flip the kind selector and the section renames before you save, which is
+        // the same feedback those blocks already give.
+        isStrength={!isWeakness}
       />
       <AttachedEvidenceSection
         slug={slug}
@@ -467,6 +471,7 @@ export function FindingDetailPage() {
         findingUuid={uuid}
         attachedUuids={attachedUuids}
         targetInPath={pickerTarget === 'path'}
+        targetIsStrength={!isWeakness}
         open={pickerTarget !== null}
         onClose={() => setPickerTarget(null)}
       />

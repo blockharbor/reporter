@@ -591,7 +591,20 @@ export function ReportsPage() {
             />
           </div>
           {section === 'configure' ? (
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(360px,560px)]">
+            /* Two-column Configure layout: section editor | live section preview.
+               The preview's fidelity target is the report's REAL printable width,
+               700.8px (Letter minus 2 × 0.6in margins — pinned by
+               apps/server/src/services/report-style.test.ts). The preview iframe's body
+               adds 2 × 34px of `.pad` (findings-report.ts) and the Card a 1px border
+               each side, so a 768px track lands the preview's text column at ~698px:
+               effectively 1:1 with the exported PDF, against ~490px before.
+
+               Spending the extra width only at `wide:` — the viewport where the page
+               container reaches its cap — keeps the editor column at the ~536px it has
+               today and leaves every narrower viewport, 1280px laptops included,
+               byte-identical. Both tracks keep `minmax(0,1fr)` first: that is the
+               overflow discipline the shell's `overflow-x-clip` depends on. */
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(360px,560px)] wide:grid-cols-[minmax(0,1fr)_minmax(360px,768px)]">
               <div className="space-y-4">
                 {/* Section list */}
                 <Card className="space-y-3 p-4">
@@ -1405,8 +1418,10 @@ function ExecutionExtraControls({
  * a sub-item is absent-means-shown, so a new key there would have turned strength
  * cards on for every engagement at once. Its hint has to carry where a strength
  * appears without it (a row of the Summary of Strengths table, over in Assessment
- * Findings) and that the severity-shaped parts above never reach a strength card —
- * the server drops them by kind, so none of them can print an empty heading.
+ * Findings), that the severity-shaped parts above never reach a strength card —
+ * the server drops them by kind, so none of them can print an empty heading — and
+ * that the ordered-steps sub-item DOES reach it, under its own heading, because an
+ * attack path and a strength's steps taken are the same rows said two ways.
  */
 function DetailedFindingsExtraControls({
   showLinkedGoals,
@@ -1455,8 +1470,9 @@ function DetailedFindingsExtraControls({
           <span className="block text-xs text-muted">
             Give every strength its own card after the weaknesses, numbered S1, S2, … to match the
             Summary of Strengths table — description, affected target and category, plus whichever
-            parts above a strength can fill (Impact, Remediation and the attack path belong to a
-            weakness alone). Off, a strength appears only as a row in that table.
+            parts above a strength can fill, including its ordered steps, printed as “Steps Taken”
+            rather than “Attack Path”. Impact, Remediation and the severity rating belong to a
+            weakness alone. Off, a strength appears only as a row in that table.
           </span>
         </span>
       </label>

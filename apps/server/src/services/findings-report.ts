@@ -870,10 +870,14 @@ async function fetchFindingGoals(
  * `cvss*`, `fixEffort`, `impact` and `remediation` on a strength, so those would
  * come out blank; each is skipped by kind rather than by emptiness, so no heading
  * can ever print with nothing under it and a legacy row that still holds a stale
- * rating cannot sneak one onto a strength's card. The Attack Path bucket is
- * skipped too — an attack path is the narrative of a weakness — which is why the
- * evidence guard below stays silent instead of claiming a strength has no
- * evidence. Strength cards only render when `showStrengthDetailCards` asks for
+ * rating cannot sneak one onto a strength's card.
+ *
+ * The ordered `inPath` bucket is NOT one of those fields — it prints on both
+ * kinds, because an author can build it on a strength and it is the only record
+ * of what was actually tried. Only its heading differs: `Attack Path` on a
+ * weakness, `Steps Taken` on a strength, since an attack path asserts an
+ * exploitation chain and a strength's steps are the attempt the control
+ * withstood. Strength cards only render when `showStrengthDetailCards` asks for
  * them; otherwise a strength appears only in the Summary of Strengths table.
  */
 async function renderFinding(
@@ -895,7 +899,10 @@ async function renderFinding(
   const pathEvidence = f.evidence.filter((e) => e.inPath);
   const attachedEvidence = f.evidence.filter((e) => !e.inPath);
 
-  /** A strength carries no risk rating, impact, remediation or attack path. */
+  /**
+   * A strength carries no risk rating, impact or remediation. It *does* carry the
+   * ordered `inPath` steps — they just print under a different heading.
+   */
   const isStrength = f.kind === 'strength';
 
   const meta: string[] = [];
@@ -951,13 +958,23 @@ async function renderFinding(
       : '';
 
   // Render evidence sequentially so at most one blob is held in memory at once.
+  //
+  // Both kinds print the same ordered, captioned `inPath` bucket, under a heading
+  // that fits the kind. A strength's steps are the verification walk-through — the
+  // attempt the control withstood — so calling them an Attack Path would assert an
+  // exploitation chain that did not happen, in a signed client deliverable. Same
+  // markup, same {@link renderPathStep}, same contiguous Step 1…N numbering; only
+  // the `<h4>` text differs. Gated by the section's own `attackPath` sub-item for
+  // both kinds, so a report that withholds the steps withholds them from
+  // weaknesses and strengths alike.
   let pathHtml = '';
-  if (!isStrength && parts.attackPath && pathEvidence.length > 0) {
+  if (parts.attackPath && pathEvidence.length > 0) {
     const steps: string[] = [];
     for (let s = 0; s < pathEvidence.length; s++) {
       steps.push(await renderPathStep(app, pathEvidence[s]!, s + 1, budget));
     }
-    pathHtml = `<h4 class="sub">Attack Path (${pathEvidence.length})</h4><div class="path">${steps.join('\n')}</div>`;
+    const pathHeading = isStrength ? 'Steps Taken' : 'Attack Path';
+    pathHtml = `<h4 class="sub">${pathHeading} (${pathEvidence.length})</h4><div class="path">${steps.join('\n')}</div>`;
   }
 
   const showAttached = parts.attachedEvidence && attachedEvidence.length > 0;

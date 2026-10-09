@@ -35,6 +35,33 @@
   --radius-panel: var(--radius-lg);
 }
 
+/*
+ * Page container. The app shell is `mx-auto max-w-page px-4` in BOTH places it
+ * appears (the header's inner row and <main>, apps/web/src/components/AppLayout.tsx),
+ * so the readable CONTENT box is this token minus the two 16px px-4 gutters:
+ *
+ *     1352px (84.5rem) - 2 x 16px = 1320px of content
+ *
+ * It was Tailwind's stock `max-w-6xl` (72rem = 1152px -> 1120px of content). Every
+ * width discussion here has quoted the inner measurement, so the arithmetic is
+ * recorded once, here, rather than re-derived from a scale value. Change the token,
+ * not the gutters.
+ *
+ * Plain `@theme`, not `@theme inline`: `inline` bakes the literal into the utility
+ * and never declares `--container-page`, which hand-written CSS could not then read.
+ *
+ * `--breakpoint-wide` is deliberately the SAME length, so the `wide:` variant fires
+ * at exactly the viewport width where the container stops growing — i.e. where the
+ * content box first reaches its full 1320px. A layout that wants to spend the extra
+ * width differently (Reports -> Configure) branches there, not at `xl:` (1280px),
+ * where the container is still fluid. Tailwind sorts it between `xl:` and `2xl:` by
+ * value, so `wide:` correctly overrides `lg:` on the same property.
+ */
+@theme {
+  --container-page: 84.5rem; /* 1352px -> 1320px of content inside px-4 */
+  --breakpoint-wide: 84.5rem; /* == --container-page: the cap is reached */
+}
+
 @layer base {
   html,
   body {
@@ -168,4 +195,27 @@
 .md-body th {
   background: var(--surface-2);
   font-weight: 600;
+}
+
+/*
+ * Reading measure. The shell caps content at 1320px (see `--container-page` above),
+ * which is roughly 165 characters of body text — well past the 45-75 that reads
+ * comfortably, and the one real cost of the wider page.
+ *
+ * Capped per prose block rather than on `.md-body` itself, so `pre`, `table` and
+ * images keep the FULL column width — being able to see a wide table or a long
+ * terminal line without scrolling is most of the reason a wider page is worth
+ * having. `ch` is relative to each element's own font size, so a heading caps at a
+ * proportionally shorter line, which is the desired result. Direct children only:
+ * nested lists take their measure from the `ul`/`ol` that contains them.
+ */
+.md-body > p,
+.md-body > ul,
+.md-body > ol,
+.md-body > blockquote,
+.md-body > h1,
+.md-body > h2,
+.md-body > h3,
+.md-body > h4 {
+  max-width: 80ch;
 }

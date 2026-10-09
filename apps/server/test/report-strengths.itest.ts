@@ -24,7 +24,11 @@ const GENERATED_AT = new Date('2026-03-04T12:00:00.000Z');
  *
  * `S1` ("Secure boot chain enforced") is the fully-furnished strength: a
  * description, an affected target, a category, a standards mapping, one attached
- * evidence item, one attack-path evidence item, and two linked goals.
+ * evidence item, one ordered step (`inPath`), and two linked goals.
+ *
+ * The weakness carries one ordered step of its own, so the suite can prove the two
+ * kinds print the same rows under different headings — "Attack Path" on a weakness,
+ * "Steps Taken" on a strength — rather than one of them simply not rendering.
  *
  * `S2` is the sharp one. It is written straight through Prisma with a severity, a
  * CVSS vector/score, a fix effort, an impact and a remediation — values the
@@ -123,7 +127,12 @@ async function setup() {
     ],
   });
 
-  const makeEvidence = async (title: string, body: string, inPath: boolean) => {
+  const makeEvidence = async (
+    title: string,
+    body: string,
+    inPath: boolean,
+    findingId = strength.id,
+  ) => {
     const blobKey = `notes/${title.replace(/\s+/g, '-').toLowerCase()}`;
     await app.blobs.put(blobKey, Buffer.from(body));
     const ev = await app.db.evidence.create({
@@ -140,9 +149,9 @@ async function setup() {
     await app.db.evidenceFinding.create({
       data: {
         evidenceId: ev.id,
-        findingId: strength.id,
+        findingId,
         inPath,
-        caption: inPath ? 'A step that should never print on a strength.' : '',
+        caption: inPath ? 'Pulled the fuse map and confirmed every debug pin is blown.' : '',
         position: 0,
       },
     });
@@ -150,25 +159,39 @@ async function setup() {
   };
   await makeEvidence('Boot log transcript', 'Verified stage 2 signature.', false);
   await makeEvidence('Fuse map readout', 'All debug fuses blown.', true);
+  await makeEvidence(
+    'Cipher scan output',
+    'ssl-enum-ciphers still offers TLS_RSA_WITH_3DES_EDE_CBC_SHA.',
+    true,
+    weakness.id,
+  );
 
   const cookie = await loginCookie(app, 'writer@test.local', 'password123');
   return { users, eng, cookie, strength, staleStrength, weakness };
 }
 
 /**
- * Render a section-configured report, optionally flipping the new flag or the
- * Assessment Findings sub-items. Passing neither leaves the section with no
- * `options` map and the flag unset — the shape every engagement configured before
- * this feature has on disk.
+ * Render a section-configured report, optionally flipping the new flag, the
+ * Assessment Findings sub-items (`options`) or the Detailed Findings sub-items
+ * (`findingOptions`). Passing none of them leaves both sections with no `options`
+ * map and the flag unset — the shape every engagement configured before this
+ * feature has on disk.
  */
 function render(
   eng: { id: number; slug: string; name: string },
   userId: number,
-  opts: { showStrengthDetailCards?: boolean; options?: Record<string, boolean> } = {},
+  opts: {
+    showStrengthDetailCards?: boolean;
+    options?: Record<string, boolean>;
+    findingOptions?: Record<string, boolean>;
+  } = {},
 ): Promise<string> {
-  const sections: ReportSectionEntry[] = DEFAULT_REPORT_SECTIONS.map((s) =>
-    s.key === 'assessmentFindings' && opts.options ? { ...s, options: opts.options } : s,
-  );
+  const sections: ReportSectionEntry[] = DEFAULT_REPORT_SECTIONS.map((s) => {
+    if (s.key === 'assessmentFindings' && opts.options) return { ...s, options: opts.options };
+    if (s.key === 'detailedFindings' && opts.findingOptions)
+      return { ...s, options: opts.findingOptions };
+    return s;
+  });
   const reportOptions: ReportOptions = {
     sections,
     customSections: [],
@@ -232,14 +255,17 @@ describe('strength detail cards in Detailed Findings', () => {
     );
   });
 
-  it('carries only what a strength has — no severity, impact, remediation or attack path', async () => {
+  it('carries only what a strength has — no severity, impact or remediation', async () => {
     const { users, eng } = await setup();
     const html = await render(eng, users.writer.id, { showStrengthDetailCards: true });
     const cards = strengthCards(html);
 
     for (const card of cards) {
-      // No heading with nothing under it, and no heading at all for the three
-      // sub-items a strength cannot fill.
+      // No heading with nothing under it, and no heading at all for the two
+      // sub-items a strength cannot fill. `Attack Path` stays banned even though a
+      // strength now prints its ordered steps: those go under `Steps Taken`,
+      // because a path claims an exploitation chain and a strength's steps are the
+      // attempt the control withstood.
       expect(card).not.toContain('<h4 class="sub">Impact</h4>');
       expect(card).not.toContain('<h4 class="sub">Remediation</h4>');
       expect(card).not.toContain('<h4 class="sub">Attack Path');
@@ -268,20 +294,76 @@ describe('strength detail cards in Detailed Findings', () => {
     expect(first).toContain('<h4 class="sub">Attached Evidence (1)</h4>');
     expect(first).toContain('<h4 class="sub">Linked Goals</h4>');
     expect(first).toContain('Boot integrity');
+    expect(first).toContain('<h4 class="sub">Steps Taken (1)</h4>');
+    expect(first).toContain('Pulled the fuse map and confirmed every debug pin is blown.');
   });
 
-  it('never claims a strength has no evidence just because its attack path is hidden', async () => {
+  it('never claims a strength has no evidence just because its buckets are hidden', async () => {
+    const { users, eng } = await setup();
+    const html = await render(eng, users.writer.id, {
+      showStrengthDetailCards: true,
+      findingOptions: { attackPath: false, attachedEvidence: false },
+    });
+    const cards = strengthCards(html);
+
+    // S1 has one attached item and one ordered step. Both buckets are switched off,
+    // so neither prints — and the step's caption goes with it…
+    expect(cards[0]).not.toContain('<h4 class="sub">Steps Taken');
+    expect(cards[0]).not.toContain('<h4 class="sub">Attached Evidence');
+    expect(cards[0]).not.toContain('Pulled the fuse map and confirmed every debug pin is blown.');
+    // …but a deliverable does not assert an absence that isn't true: only S2, which
+    // has no evidence links at all, may say so.
+    expect(cards[0]).not.toContain('No evidence attached.');
+    expect(cards[1]).toContain('No evidence attached.');
+  });
+
+  it('prints a strength’s ordered steps under “Steps Taken”, and nothing when it has none', async () => {
     const { users, eng } = await setup();
     const html = await render(eng, users.writer.id, { showStrengthDetailCards: true });
     const cards = strengthCards(html);
 
-    // S1 has one attached item and one attack-path item. The path bucket is not
-    // printed, and its caption goes with it…
-    expect(cards[0]).not.toContain('A step that should never print on a strength.');
-    // …but S2, which has no evidence links at all, is the only card allowed to say
-    // so, and the hidden-path card must not.
-    expect(cards[0]).not.toContain('No evidence attached.');
-    expect(cards[1]).toContain('No evidence attached.');
+    // S1 has one ordered step: heading, count, step label and the markdown-rendered
+    // caption, numbered from 1 exactly as a weakness's steps are.
+    expect(cards[0]).toContain('<h4 class="sub">Steps Taken (1)</h4>');
+    expect(cards[0]).toContain('<div class="path">');
+    expect(cards[0]).toContain('Step 1');
+    expect(cards[0]).toContain('Pulled the fuse map and confirmed every debug pin is blown.');
+    expect(cards[0]).toContain('Fuse map readout');
+
+    // S2 has no `inPath` rows at all, so there is no heading — never an empty one.
+    expect(cards[1]).not.toContain('Steps Taken');
+    expect(cards[1]).not.toContain('<div class="path">');
+  });
+
+  it('keeps the weakness heading “Attack Path”, and gives a strength the other one', async () => {
+    const { users, eng } = await setup();
+    const html = await render(eng, users.writer.id, { showStrengthDetailCards: true });
+
+    // The weakness's own step is untouched by the change: same heading string, same
+    // count. An attack path still means an attack path.
+    expect(html).toContain('<h4 class="sub">Attack Path (1)</h4>');
+    expect(html).toContain('ssl-enum-ciphers still offers TLS_RSA_WITH_3DES_EDE_CBC_SHA.');
+    // …and the two headings are not interchangeable: exactly one of each renders.
+    expect(html.match(/<h4 class="sub">Attack Path \(/g)).toHaveLength(1);
+    expect(html.match(/<h4 class="sub">Steps Taken \(/g)).toHaveLength(1);
+    // The Attack Path one belongs to the weakness, which is not inside an S# card.
+    for (const card of strengthCards(html)) expect(card).not.toContain('Attack Path');
+  });
+
+  it('suppresses a strength’s steps with the section’s own attack-path sub-item', async () => {
+    const { users, eng } = await setup();
+    const html = await render(eng, users.writer.id, {
+      showStrengthDetailCards: true,
+      findingOptions: { attackPath: false },
+    });
+
+    // One control for both kinds: a report that withholds the ordered steps
+    // withholds them from the strength cards too.
+    expect(html).not.toContain('<h4 class="sub">Steps Taken');
+    expect(html).not.toContain('<h4 class="sub">Attack Path');
+    // Only the steps go — the cards and their attached evidence still render.
+    expect(strengthCards(html)).toHaveLength(2);
+    expect(strengthCards(html)[0]).toContain('<h4 class="sub">Attached Evidence (1)</h4>');
   });
 
   it('honours the section sub-items a strength can fill', async () => {
@@ -305,6 +387,8 @@ describe('strength detail cards in Detailed Findings', () => {
     // Still a card, still the description, still the goals.
     expect(first).toContain('<h4 class="sub">Description</h4>');
     expect(first).toContain('<h4 class="sub">Linked Goals</h4>');
+    // …and an untouched `attackPath` sub-item leaves the ordered steps on.
+    expect(first).toContain('<h4 class="sub">Steps Taken (1)</h4>');
   });
 
   it('prints no per-card goal block when the report opted out of linked goals', async () => {

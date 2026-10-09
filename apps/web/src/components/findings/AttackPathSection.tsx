@@ -29,6 +29,13 @@ import { FindingEvidenceCard } from './FindingEvidenceCard.js';
 /**
  * The ordered, captioned Attack Path bucket (inPath=true). Numbered, drag-reorderable
  * steps with per-step captions, plus move-to-attached and detach actions.
+ *
+ * The same rows mean two different things depending on the finding's kind, so the
+ * copy follows the report's wording exactly: a weakness builds an **Attack Path**,
+ * a strength records the **Steps Taken** — the attempt the control withstood.
+ * Calling a strength's verification an attack path would assert an exploitation
+ * that did not happen. See `renderFinding` in the server's findings-report service,
+ * which picks its `<h4>` by the same rule; the two must not drift.
  */
 export function AttackPathSection({
   slug,
@@ -36,6 +43,7 @@ export function AttackPathSection({
   items,
   onAddStep,
   canWrite,
+  isStrength,
 }: {
   slug: string;
   findingUuid: string;
@@ -43,6 +51,8 @@ export function AttackPathSection({
   onAddStep: () => void;
   /** The user may edit the finding; false renders every mutating control disabled. */
   canWrite: boolean;
+  /** Switches the section's wording from "Attack Path" to "Steps Taken". */
+  isStrength: boolean;
 }) {
   const reorder = useReorderEvidence(slug, findingUuid);
 
@@ -65,7 +75,9 @@ export function AttackPathSection({
   return (
     <Card className="space-y-3 p-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-text">Attack Path ({items.length})</h3>
+        <h3 className="text-sm font-semibold text-text">
+          {isStrength ? 'Steps Taken' : 'Attack Path'} ({items.length})
+        </h3>
         <Button
           size="sm"
           onClick={onAddStep}
@@ -78,8 +90,12 @@ export function AttackPathSection({
 
       {items.length === 0 ? (
         <EmptyState
-          title="Build the attack path"
-          description="Add evidence steps that tell the story of the attack, in order."
+          title={isStrength ? 'Record the steps taken' : 'Build the attack path'}
+          description={
+            isStrength
+              ? 'Add evidence steps showing what was tried against this control, in order.'
+              : 'Add evidence steps that tell the story of the attack, in order.'
+          }
           action={
             <Button
               size="sm"
@@ -109,6 +125,7 @@ export function AttackPathSection({
                   stepNumber={i + 1}
                   isLast={i === items.length - 1}
                   canWrite={canWrite}
+                  isStrength={isStrength}
                 />
               ))}
             </ol>
@@ -126,6 +143,7 @@ function SortableStep({
   stepNumber,
   isLast,
   canWrite,
+  isStrength,
 }: {
   slug: string;
   findingUuid: string;
@@ -133,6 +151,8 @@ function SortableStep({
   stepNumber: number;
   isLast: boolean;
   canWrite: boolean;
+  /** Switches this row's copy to the strength wording; see {@link AttackPathSection}. */
+  isStrength: boolean;
 }) {
   const toast = useToast();
   const confirm = useConfirm();
@@ -146,7 +166,9 @@ function SortableStep({
   async function onDetach() {
     const ok = await confirm({
       title: 'Remove step',
-      message: 'Remove this evidence from the attack path? The evidence itself is kept.',
+      message: isStrength
+        ? 'Remove this evidence from the steps taken? The evidence itself is kept.'
+        : 'Remove this evidence from the attack path? The evidence itself is kept.',
       confirmLabel: 'Remove',
       danger: true,
     });

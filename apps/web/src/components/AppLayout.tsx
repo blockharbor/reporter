@@ -2,6 +2,17 @@ import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { Button, Logo, useTheme } from '@reporter/ui';
 import { useAuth } from '../auth.js';
 
+/**
+ * The page container, used by BOTH the header's inner row and `<main>`. The top
+ * nav lines up with page content only while the two agree on the cap *and* the
+ * gutter, so they share one string rather than two copies that can drift.
+ *
+ * `max-w-page` is 1352px, which is 1320px of content inside these `px-4` gutters —
+ * the arithmetic is derived once in `packages/ui/src/theme.css`. Written as a
+ * literal (not composed) so Tailwind's source scanner can see the class names.
+ */
+const PAGE_CONTAINER = 'mx-auto max-w-page px-4';
+
 export function AppLayout() {
   const { user, logout } = useAuth();
   const { resolved, toggle } = useTheme();
@@ -28,7 +39,7 @@ export function AppLayout() {
     // own `min-w-0` boxes rather than being clipped.
     <div className="min-h-screen overflow-x-clip bg-bg text-text">
       <header className="border-b border-border bg-surface">
-        <div className="mx-auto flex h-14 max-w-6xl items-center gap-4 px-4">
+        <div className={`${PAGE_CONTAINER} flex h-14 items-center gap-4`}>
           <Link to="/engagements" className="flex items-center gap-2 font-semibold">
             <Logo size={26} />
             reporter
@@ -58,7 +69,7 @@ export function AppLayout() {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-4 py-6">
+      <main className={`${PAGE_CONTAINER} py-6`}>
         <Outlet />
       </main>
     </div>

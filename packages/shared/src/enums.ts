@@ -683,8 +683,9 @@ export const REPORT_SECTION_ITEMS: Partial<Record<ReportSection, ReportSectionIt
     },
     {
       key: 'attackPath',
-      label: 'Attack path',
-      sample: 'The ordered, captioned attack-path steps.',
+      label: 'Attack path / steps taken',
+      sample:
+        'The ordered, captioned steps on each card — “Attack Path” on a weakness, “Steps Taken” on a strength.',
     },
     {
       key: 'attachedEvidence',

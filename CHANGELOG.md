@@ -10,6 +10,43 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ### Changed
 
+- **The page is wider: 1320px of content, up from 1120px.** The app shell was
+  capped at Tailwind's stock `max-w-6xl` (1152px), which leaves 1120px inside its
+  gutters — the figure every width discussion here has quoted. It is now a named
+  `--container-page` token (1352px, so 1320px of content), declared once in
+  `packages/ui/src/theme.css` with the gutter subtraction written down beside it so
+  nobody has to re-derive it from a scale value again. The header row and `<main>`
+  share a single `PAGE_CONTAINER` string rather than two copies, because the top nav
+  aligns with page content only while the two agree. Narrower viewports are
+  unaffected: the container was already fluid below its cap, so every width from a
+  phone to a 1280px laptop renders exactly as before.
+
+  Rendered markdown gained a reading measure at the same time. At 1320px a
+  paragraph would have run to roughly 165 characters a line, well past what is
+  comfortable, so prose blocks cap at 80 characters — while code blocks, tables and
+  images keep the full column, which is most of the reason a wider page is worth
+  having. Reports → Configure spends its extra width on the live section preview,
+  widening that column to 768px once the container stops growing: the preview's text
+  then measures about 698px against the exported PDF's real 700.8px printable width,
+  effectively 1:1, where before it was around 490px. The exported PDF itself is
+  untouched — it is a self-contained server-rendered document with its own `@page`
+  geometry in inches and shares no stylesheet with the app.
+
+- **A strength's detail card now prints the steps taken to verify it.** The ordered,
+  captioned evidence steps a finding carries were withheld from strength cards
+  entirely: the finding page has always let an author build them on a strength, and
+  the report silently dropped them, which the option's own help text advertised. They
+  now print on both kinds under a heading that fits the kind — `Attack Path` on a
+  weakness, `Steps Taken` on a strength, because an attack path asserts an
+  exploitation chain and a strength's steps are the attempt the control withstood.
+  Same markup, same contiguous `Step 1…N` numbering, same markdown captions. The
+  Detailed Findings section's existing attack-path checkbox governs both, so a report
+  that withholds the ordered steps still withholds them everywhere; its label now
+  reads "Attack path / steps taken" to say so. A strength with no steps prints no
+  heading, and everything a strength still cannot carry — Impact, Remediation, the
+  severity rating — is dropped by kind exactly as before. The finding page follows the
+  same wording, so the section renames itself when a finding is marked a strength.
+
 - **The server update step in `DEPLOY.md` now fetches and resets instead of pulling.**
   `git pull` has to reconcile the local branch against the remote, so it stops with
   `fatal: Need to specify how to reconcile divergent branches` on any checkout whose

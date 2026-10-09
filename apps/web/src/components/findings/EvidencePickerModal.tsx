@@ -43,6 +43,7 @@ export function EvidencePickerModal({
   findingUuid,
   attachedUuids,
   targetInPath,
+  targetIsStrength = false,
   open,
   onClose,
   onPick,
@@ -52,6 +53,12 @@ export function EvidencePickerModal({
   findingUuid?: string;
   attachedUuids: string[];
   targetInPath: boolean;
+  /**
+   * The finding being added to is a strength, so the ordered bucket is its
+   * "Steps Taken" rather than an attack path. Title copy only — see
+   * {@link AttackPathSection}, which this follows.
+   */
+  targetIsStrength?: boolean;
   open: boolean;
   onClose: () => void;
   /**
@@ -146,7 +153,9 @@ export function EvidencePickerModal({
   const title = onPick
     ? 'Add evidence'
     : targetInPath
-      ? 'Add attack-path steps'
+      ? targetIsStrength
+        ? 'Add steps taken'
+        : 'Add attack-path steps'
       : 'Attach evidence';
   const n = selected.length;
   const submitLabel = onPick
