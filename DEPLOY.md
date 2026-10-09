@@ -235,9 +235,22 @@ Both clients authenticate with an **access key + secret key** pair:
 
 ```bash
 cd reporter
-git pull                       # or copy the new version over
+git fetch origin
+git reset --hard origin/main   # make the checkout match the remote exactly
 docker compose up -d --build   # rebuilds; migrations re-apply automatically
 ```
+
+> **Why `fetch` + `reset` and not `git pull`.** `git pull` has to reconcile your local
+> `main` with the remote one, so it stops with
+> `fatal: Need to specify how to reconcile divergent branches` whenever the published
+> history has been rewritten, and it silently writes a merge commit the rest of the time.
+> Resetting takes the remote as the truth and skips both problems.
+>
+> **It does not touch your data.** The database and the evidence blobs live in the named
+> Docker volumes `reporter_pgdata` and `reporter_blobdata`, outside the checkout, and
+> `.env` is untracked — a reset leaves all three exactly as they are. What it _does_
+> discard is local edits to tracked files, so run `git status` first and copy aside
+> anything of your own. Take a [backup](#backups) before any update regardless.
 
 **Clients:** rebuild the `.dmg` / tarball and reinstall (steps above).
 

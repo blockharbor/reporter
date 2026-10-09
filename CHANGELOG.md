@@ -8,6 +8,20 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ## [Unreleased]
 
+### Changed
+
+- **The server update step in `DEPLOY.md` now fetches and resets instead of pulling.**
+  `git pull` has to reconcile the local branch against the remote, so it stops with
+  `fatal: Need to specify how to reconcile divergent branches` on any checkout whose
+  upstream history has been rewritten — which is exactly what a deployed server hit
+  after the 2026-10-08 rewrite — and quietly writes a merge commit the rest of the
+  time. `git fetch origin` followed by `git reset --hard origin/main` takes the remote
+  as the truth and does the right thing in both cases. A note beside it says plainly
+  what a reset does and does not touch: the database and evidence blobs live in the
+  named Docker volumes `reporter_pgdata` and `reporter_blobdata` and `.env` is
+  untracked, so none of the three move, while local edits to tracked files are
+  discarded — run `git status` first.
+
 ## [0.12.0] - 2026-10-08
 
 ### Added
