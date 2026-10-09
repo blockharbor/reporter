@@ -53,7 +53,7 @@ import { buildEvidenceWhere } from '../helpers/timeline-filter.js';
 import { REPORT_VISIBLE_EVIDENCE } from '../helpers/report-visibility.js';
 import { fetchGoalsTree, progressFromTree } from './goals.js';
 import { getReportSettings } from './report-settings.js';
-import { EVIDENCE_TAG_ORDER_BY } from './tags.js';
+import { EVIDENCE_TAG_ORDER_BY, FINDING_TAG_ORDER_BY } from './tags.js';
 import {
   FONT_LINKS,
   WATERMARK_OPACITY_VALUES,
@@ -107,6 +107,15 @@ interface GatheredFinding {
   unr155Refs: string[];
   remediation: string;
   category: string | null;
+  /**
+   * The finding's own tags (`FindingTag`), name + stored palette color, in the
+   * engagement's curated tag order — fixed in the query so every consumer sees
+   * the same sequence rather than whatever the join returns.
+   *
+   * These are a *finding's* tags, not its evidence's: `GatheredEvidence` still
+   * has no `tags` field and finding evidence still prints none.
+   */
+  tags: { name: string; colorName: string }[];
   severity: Severity | null;
   cvssVector: string | null;
   cvssScore: number | null;
@@ -276,6 +285,13 @@ async function gather(
         // render path reads it, only the export.
         include: { evidence: { include: { parent: { select: { excludeFromReport: true } } } } },
       },
+      // The finding's tags, for the Detailed Findings `tags` sub-item. Ordered in
+      // the query, in the engagement's curated order, so every consumer sees the
+      // same sequence. Only the PDF reads them: `buildFindingsExport` maps its
+      // fields explicitly and deliberately omits tags, because the findings-only
+      // export carries no tags for evidence either (see the Backward compat note
+      // in the pull request that added this).
+      tags: { include: { tag: true }, orderBy: FINDING_TAG_ORDER_BY },
       // The unfiltered link count, so `excludedEvidenceCount` below is exact
       // without loading the excluded rows we just refused to read. (Under
       // `full-backup` it equals the rows loaded, so that count comes out 0.)
@@ -301,6 +317,7 @@ async function gather(
     cvssScore: f.cvssScore,
     readyToReport: f.readyToReport,
     position: f.position,
+    tags: f.tags.map((ft) => ({ name: ft.tag.name, colorName: ft.tag.colorName })),
     excludedEvidenceCount: f._count.evidence - f.evidence.length,
     evidence: f.evidence.map((link) => ({
       uuid: link.evidence.uuid,
@@ -516,7 +533,11 @@ function severityPill(sev: Severity | null, score: number | null): string {
   return `<span class="pill pill-sev-${sev}">${esc(label)}${esc(scoreTxt)}</span>`;
 }
 
-/** A small tag chip using the shared tag palette. */
+/**
+ * A small tag chip using the shared tag palette. Two call sites: a timeline
+ * evidence item's tags, and a finding's own tags in Detailed Findings. The name is
+ * `esc()`'d — a tag name is a verbatim label, never markdown.
+ */
 function tagChip(name: string, colorName: string): string {
   const c = tagColor(colorName);
   return `<span class="chip" style="background:${c.light};color:${c.fg}">${esc(name)}</span>`;
@@ -768,6 +789,8 @@ function standardsBlock(iso: string[], unr: string[]): string {
 
 /** Which detail sub-blocks of a finding card to render (per the section config). */
 interface FindingParts {
+  /** The finding's own tag chips, first because they render first. */
+  tags: boolean;
   impact: boolean;
   standards: boolean;
   remediation: boolean;
@@ -777,6 +800,7 @@ interface FindingParts {
 }
 /** All finding sub-blocks on — the default when a report isn't section-configured. */
 const ALL_FINDING_PARTS: FindingParts = {
+  tags: true,
   impact: true,
   standards: true,
   remediation: true,
@@ -917,6 +941,27 @@ async function renderFinding(
       meta.push(`<strong>Fix effort:</strong> ${esc(FIX_EFFORT_LABELS[f.fixEffort])}`);
   }
 
+  // The finding's own tags, as chips under the meta line. Kind-neutral: a
+  // strength is tagged like a weakness, and a tag is not one of the
+  // severity-shaped fields a strength card drops by kind — so no `isStrength`
+  // guard here.
+  //
+  // A tag name is a verbatim label. It is typed into a plain input (the
+  // engagement's tag manager / picker), never a markdown editor, so it goes
+  // through `esc()` inside `tagChip` and must never go through `prose()` — which
+  // would italicise `_lateral_ move`, and would emit a block element inside this
+  // flex row besides.
+  //
+  // Empty for a finding with no tags, and interpolated with no surrounding
+  // whitespace in the template below, so an untagged card is byte-for-byte the
+  // card it rendered before this block existed. A finding with no tags prints
+  // nothing at all — no empty row, no "No tags" — the same rule the evidence and
+  // goals blocks follow.
+  const tagsHtml =
+    parts.tags && f.tags.length > 0
+      ? `<div class="finding-tags">${f.tags.map((t) => tagChip(t.name, t.colorName)).join('')}</div>`
+      : '';
+
   const descHtml = prose(f.description) || '<p class="pp muted">No description provided.</p>';
   const impactHtml =
     !isStrength && parts.impact && f.impact.trim()
@@ -1002,7 +1047,7 @@ async function renderFinding(
         <span class="finding-title">${esc(f.title)}</span>
         ${isStrength ? '' : severityPill(f.severity, f.cvssScore)}
       </div>
-      <p class="finding-meta">${meta.join('<span class="sep">·</span>')}</p>
+      <p class="finding-meta">${meta.join('<span class="sep">·</span>')}</p>${tagsHtml}
       <h4 class="sub">Description</h4>
       ${descHtml}
       ${impactHtml}
@@ -1048,9 +1093,15 @@ interface EvidenceMetaVisibility extends EvidenceDisplay {
   timestamps: boolean;
   operators: boolean;
   /**
-   * Render the item's tag chips. Tags are only ever rendered *here*, in a
-   * timeline subsection — a narrative subsection embeds hand-picked figures and
-   * has never printed their tags — so this flag has no effect anywhere else.
+   * Render the evidence item's tag chips. An *evidence* item's tags are only
+   * ever rendered here, in a timeline subsection — a narrative subsection embeds
+   * hand-picked figures and has never printed their tags — so this flag still
+   * has no effect anywhere else.
+   *
+   * A *finding's* tags are different rows (`FindingTag`, not `EvidenceTag`) and a
+   * different control: {@link renderFinding} prints them under Detailed
+   * Findings' own `tags` sub-item. This flag does not reach them, and turning
+   * `evidenceTags` off does not suppress them.
    */
   tags: boolean;
 }
@@ -2290,6 +2341,7 @@ export async function buildReportHtml(
         break;
       case 'detailedFindings': {
         const findingParts: FindingParts = {
+          tags: partOn('tags'),
           impact: partOn('impact'),
           standards: partOn('standards'),
           remediation: partOn('remediation'),

@@ -603,9 +603,12 @@ const asJson = (value: unknown): Prisma.InputJsonValue => value as Prisma.InputJ
  *   1. Engagement           — everything below has `engagementId`.
  *   2. UserEngagementRole   — the importing user as `admin` (membership is never
  *                             exported; see the module header).
- *   3. Tag                  — before TargetActivity (`tagId`) and EvidenceTag.
+ *   3. Tag                  — before TargetActivity (`tagId`), EvidenceTag and
+ *                             FindingTag.
  *   4. FindingCategory      — before Finding (`categoryId`).
- *   5. Finding              — before EvidenceFinding and GoalFinding.
+ *   5. Finding              — before FindingTag, EvidenceFinding and GoalFinding.
+ *   5a. FindingTag          — needs Tag (3) and Finding (5), both of which exist by
+ *                             then, so it needs no later pass.
  *   6. Evidence             — before EvidenceTag / EvidenceComment /
  *                             EvidenceFinding / GoalEvidence, and before its own
  *                             `parentEvidenceId` back-fill.
@@ -627,10 +630,10 @@ const asJson = (value: unknown): Prisma.InputJsonValue => value as Prisma.InputJ
  * `Engagement.slug` (uniquified below, with the index as backstop),
  * `Tag[engagementId, name]`, `FindingCategory[engagementId, category]` and
  * `SavedQuery[engagementId, name, type]` are deduped by key within the file, and
- * the composite primary keys of the four link tables
+ * the composite primary keys of the five link tables
  * (`GoalEvidence[goalId, evidenceId]`, `GoalFinding[goalId, findingId]`,
- * `EvidenceTag[evidenceId, tagId]`, `EvidenceFinding[evidenceId, findingId]`) are
- * deduped per owner. The remaining unique columns are the uuids, all freshly minted.
+ * `EvidenceTag[evidenceId, tagId]`, `FindingTag[findingId, tagId]`,
+ * `EvidenceFinding[evidenceId, findingId]`) are deduped per owner. The remaining unique columns are the uuids, all freshly minted.
  * Nothing else in the file maps to a unique index: `position` columns on
  * EngagementTarget / TargetActivity / ActivityGoal / Finding / EvidenceFinding are
  * plain integers, and are restored verbatim rather than renumbered so the new
@@ -818,6 +821,32 @@ async function insertEngagement(
     const next = ins.findingUuidMap.get(oldUuid);
     return next === undefined ? undefined : findingIdByUuid.get(next);
   };
+
+  // 5a. Finding tags, deduped per finding. Tags (3) and findings (5) both exist
+  // by now, so unlike the evidence tags at 8a this needs no later pass. A name
+  // the file's own tag list never defines is dropped and counted, never a
+  // failure — same counter the evidence and activity references use.
+  const findingTagRows: { findingId: number; tagId: number }[] = [];
+  for (let i = 0; i < data.findings.length; i++) {
+    const f = data.findings[i]!;
+    const ownerId = findingIdByUuid.get(ins.newFindingUuids[i]!);
+    if (ownerId === undefined) continue;
+    const seen = new Set<number>();
+    for (const tagName of f.tagNames) {
+      const tagId = tagIdByName.get(tagName);
+      if (tagId === undefined) {
+        dropped.unknownTagRefs++;
+        continue;
+      }
+      if (seen.has(tagId)) {
+        dropped.duplicates++;
+        continue;
+      }
+      seen.add(tagId);
+      findingTagRows.push({ findingId: ownerId, tagId });
+    }
+  }
+  if (findingTagRows.length > 0) await tx.findingTag.createMany({ data: findingTagRows });
 
   // 6. Evidence, without parent links (see 7). Hash and size come from the bytes
   // this import actually inflated and stored, not from the file.

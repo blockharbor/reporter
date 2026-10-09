@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Button, Input, Select } from '@reporter/ui';
+import { Button, Input, Select, type PickableTag } from '@reporter/ui';
 import { ISO_21434_WORK_PRODUCTS, UN_R155_REQUIREMENTS } from '@reporter/shared';
-import { useFindingCategories } from '../../api/hooks.js';
+import { useFindingCategories, useTags } from '../../api/hooks.js';
+import { TagsFilter } from '../evidence/filters/TagsFilter.js';
 import { ActiveFindingFilterChips } from './ActiveFindingFilterChips.js';
 import { CategoryFilter } from './filters/CategoryFilter.js';
 import { FixEffortFilter } from './filters/FixEffortFilter.js';
@@ -96,6 +97,25 @@ export function FindingsFilterBar({
     if (!categoryNames.includes(selected)) categoryNames.push(selected);
   }
 
+  const { data: tags } = useTags(slug);
+
+  // The engagement's tags, with any already-selected *name* unioned in so a
+  // deep-linked filter is never dropped from its own option list (a tag can be
+  // deleted while a link naming it is still in circulation) — the same guard the
+  // categories above get. The synthetic ids are negative because TagsFilter only
+  // uses an id to round-trip back to a name, and a negative id can never collide
+  // with a real one.
+  const tagOptions: PickableTag[] = (tags ?? []).map((t) => ({
+    id: t.id,
+    name: t.name,
+    colorName: t.colorName,
+  }));
+  filter.tags.forEach((name, i) => {
+    if (!tagOptions.some((t) => t.name === name)) {
+      tagOptions.push({ id: -(i + 1), name, colorName: 'slate' });
+    }
+  });
+
   // Search is applied as the user types; the box keeps a local draft so a slow
   // render can never swallow a keystroke, and re-syncs if the URL changes elsewhere.
   const [search, setSearch] = useState(filter.search);
@@ -139,6 +159,11 @@ export function FindingsFilterBar({
           value={filter.categories}
           uncategorized={filter.uncategorized}
           onChange={(next) => onFilterChange({ ...filter, ...next })}
+        />
+        <TagsFilter
+          tags={tagOptions}
+          value={filter.tags}
+          onChange={(nextTags) => onFilterChange({ ...filter, tags: nextTags })}
         />
         <FixEffortFilter
           value={filter.fixEfforts}

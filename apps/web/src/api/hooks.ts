@@ -478,6 +478,14 @@ export const useFinding = (slug: string, uuid: string) =>
   useQuery({
     queryKey: ['finding', slug, uuid],
     queryFn: () => api.get<FindingDetail>(`/web/engagements/${slug}/findings/${uuid}`),
+    // Always refetch on mount, and the detail page waits for that fetch before it
+    // seeds its autosave form. The page seeds ONCE per finding and then diffs
+    // every save against that seed, so seeding from a cached row would be
+    // seeding from whatever the finding looked like when the user last left —
+    // and a Settings → Tags merge, unapply or delete in between would be undone
+    // by the next autosave, which re-sends the stale tag set. Invalidation alone
+    // can't prevent that: an inactive query is only marked stale, not refetched.
+    refetchOnMount: 'always',
   });
 
 export function useCreateFinding(slug: string) {
@@ -485,7 +493,11 @@ export function useCreateFinding(slug: string) {
   return useMutation({
     mutationFn: (input: CreateFindingInput) =>
       api.post<Finding>(`/web/engagements/${slug}/findings`, input),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['findings', slug] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['findings', slug] });
+      // A finding created with tags moves those tags' usage counts.
+      qc.invalidateQueries({ queryKey: ['tags', slug] });
+    },
   });
 }
 
@@ -497,6 +509,9 @@ export function useUpdateFinding(slug: string, uuid: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['findings', slug] });
       qc.invalidateQueries({ queryKey: ['finding', slug, uuid] });
+      // A finding's tags count toward each tag's usage, which Settings → Tags
+      // quotes in its delete / unapply confirmations.
+      qc.invalidateQueries({ queryKey: ['tags', slug] });
     },
   });
 }
@@ -505,7 +520,11 @@ export function useDeleteFinding(slug: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (uuid: string) => api.del(`/web/engagements/${slug}/findings/${uuid}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['findings', slug] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['findings', slug] });
+      // Its tag links cascade away with it, so the usage counts move too.
+      qc.invalidateQueries({ queryKey: ['tags', slug] });
+    },
   });
 }
 

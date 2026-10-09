@@ -8,6 +8,7 @@ import {
   ENGAGEMENT_EXPORT_FORMAT,
   ENGAGEMENT_EXPORT_MANIFEST_ENTRY,
   ENGAGEMENT_EXPORT_VERSION,
+  ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS,
   engagementExportManifestSchema,
   engagementExportSchema,
   type EngagementExport,
@@ -279,7 +280,7 @@ describe('full engagement export', () => {
     expect(zip.names.slice(2).every((n) => n.startsWith(ENGAGEMENT_EXPORT_BLOB_PREFIX))).toBe(true);
 
     expect(manifest.format).toBe(ENGAGEMENT_EXPORT_FORMAT);
-    expect(manifest.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION);
+    expect(manifest.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS);
     expect(manifest.engagement).toEqual({ slug: 'op1', name: 'Op One' });
     expect(manifest.counts).toMatchObject({
       targets: 1,
@@ -297,7 +298,7 @@ describe('full engagement export', () => {
       blobs: 2,
     });
     expect(manifest.counts.blobBytes).toBe(PNG.length + 'must-never-reach-a-report\n'.length);
-    expect(data.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION);
+    expect(data.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS);
 
     // Every blob reference in the records resolves to an entry whose bytes hash to
     // exactly that name — including the capture whose stored `sha256` column lies.
@@ -476,5 +477,47 @@ describe('full engagement export', () => {
       headers: { ...WEB_HEADERS, cookie: adminCookie },
     });
     expect(allowed.statusCode).toBe(200);
+  });
+});
+
+/*
+ * The stamp is conditional on purpose. `tagNames` on a finding is a new FIELD, and
+ * a server that predates it strips an unknown field without a word — so a tagged
+ * backup carrying the old version number would import there with every label
+ * silently gone. Bumping every backup instead would make a tag-free one, which
+ * that server could restore perfectly, refuse to import. So: the older stamp when
+ * nothing in the file needs the newer reader, the newer one the moment anything
+ * does. Both the manifest and the records carry it, and the importer gates on
+ * each, so the two must agree.
+ */
+describe('schema version stamp', () => {
+  it('keeps the pre-finding-tags stamp when no finding carries a tag', async () => {
+    await seedEngagement();
+    const cookie = await loginCookie(app, 'writer@test.local', 'password123');
+    const { manifest, data } = await fetchExport(cookie);
+
+    // The engagement HAS a tag, applied to evidence and to an activity — neither
+    // of which is what the bump is about. Only a finding's tag needs the v2 reader.
+    expect(data.evidence.some((e) => e.tagNames.length > 0)).toBe(true);
+    expect(data.findings.every((f) => f.tagNames.length === 0)).toBe(true);
+    expect(manifest.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS);
+    expect(data.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS);
+  });
+
+  it('stamps the current version in both places once a single finding is tagged', async () => {
+    const seeded = await seedEngagement();
+    await app.db.findingTag.create({
+      data: { findingId: seeded.finding.id, tagId: seeded.tag.id },
+    });
+    const cookie = await loginCookie(app, 'writer@test.local', 'password123');
+    const { manifest, data } = await fetchExport(cookie);
+
+    expect(manifest.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION);
+    expect(data.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION);
+    expect(manifest.schemaVersion).not.toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS);
+    // And the field the bump exists to protect is actually in the records.
+    const finding = data.findings.find((f) => f.uuid === seeded.finding.uuid)!;
+    expect(finding.tagNames).toEqual(['can']);
+    expect(data.findings.find((f) => f.uuid === seeded.strength.uuid)!.tagNames).toEqual([]);
   });
 });

@@ -11,6 +11,7 @@ import {
   Select,
   SeverityBadge,
   Spinner,
+  TagPicker,
   useConfirm,
   useToast,
 } from '@reporter/ui';
@@ -23,11 +24,18 @@ import {
   SEVERITIES,
   SEVERITY_LABELS,
   UN_R155_REQUIREMENTS,
+  defaultTagColorFor,
   type FindingKind,
   type FixEffort,
   type Severity,
 } from '@reporter/shared';
-import { useDeleteFinding, useFinding, useUpdateFinding } from '../api/hooks.js';
+import {
+  useCreateTag,
+  useDeleteFinding,
+  useFinding,
+  useTags,
+  useUpdateFinding,
+} from '../api/hooks.js';
 import { READ_ONLY_TITLE, useEngagementPermissions } from '../lib/permissions.js';
 import { useAutosave } from '../hooks/useAutosave.js';
 import { SaveStatusIndicator } from '../components/SaveStatusIndicator.js';
@@ -51,6 +59,8 @@ interface FindingForm {
   fixEffort: FixEffort;
   iso21434Refs: string[];
   unr155Refs: string[];
+  /** Selected engagement tag ids, always ascending — see the picker's onChange. */
+  tagIds: number[];
   readyToReport: boolean;
   severity: Severity | '';
   cvssVector: string | null;
@@ -62,10 +72,30 @@ export function FindingDetailPage() {
   const navigate = useNavigate();
   const toast = useToast();
   const confirm = useConfirm();
-  const { data: finding, isLoading } = useFinding(slug, uuid);
+  const { data: finding, isLoading, isFetching } = useFinding(slug, uuid);
   const { canWrite, canAdmin } = useEngagementPermissions(slug);
   const update = useUpdateFinding(slug, uuid);
   const del = useDeleteFinding(slug);
+  const { data: tags } = useTags(slug);
+  const createTag = useCreateTag(slug);
+
+  // Inline "+ New tag" in the picker: create a tag with a name-derived color and
+  // return its id so the picker can select it. Writers only; read-only omits it.
+  // Verbatim from EvidenceDetailPage.tsx — same affordance, same pool.
+  const onCreateTag = canWrite
+    ? async (tagName: string) => {
+        try {
+          const t = await createTag.mutateAsync({
+            name: tagName,
+            colorName: defaultTagColorFor(tagName),
+          });
+          return t.id;
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : 'Could not create tag');
+          throw err;
+        }
+      }
+    : undefined;
   // Which bucket the picker attaches into, or null when closed.
   const [pickerTarget, setPickerTarget] = useState<null | 'path' | 'attached'>(null);
   const [calc, setCalc] = useState(false);
@@ -81,6 +111,7 @@ export function FindingDetailPage() {
     fixEffort: 'none',
     iso21434Refs: [],
     unr155Refs: [],
+    tagIds: [],
     readyToReport: false,
     severity: '',
     cvssVector: null,
@@ -90,11 +121,20 @@ export function FindingDetailPage() {
   // Seed the form once per finding, not on every cache change. Optimistic
   // evidence reorder/attach/detach replace the cached `finding` object; without
   // this guard the effect would re-run and silently discard unsaved edits.
+  //
+  // …but only from a FRESH row. `useFinding` refetches on every mount, and the
+  // seed waits for that fetch (`!isFetching`) rather than taking the cached row
+  // that arrives synchronously. Seeding from the cache would seed from whatever
+  // the finding looked like when the user last left it — so a Settings → Tags
+  // merge, unapply or delete made in between would show the old chips, and the
+  // next autosave (any field) would re-send the stale `tagIds` and undo it. The
+  // page shows the spinner until the seed lands, which is a round trip to a local
+  // server.
   const seededUuid = useRef<string | null>(null);
   // Baseline the autosave diffs against; undefined until the finding loads.
   const [baseline, setBaseline] = useState<FindingForm | undefined>(undefined);
   useEffect(() => {
-    if (finding && seededUuid.current !== finding.uuid) {
+    if (finding && !isFetching && seededUuid.current !== finding.uuid) {
       seededUuid.current = finding.uuid;
       const seeded: FindingForm = {
         kind: finding.kind,
@@ -107,6 +147,11 @@ export function FindingDetailPage() {
         fixEffort: finding.fixEffort,
         iso21434Refs: finding.iso21434Refs,
         unr155Refs: finding.unr155Refs,
+        // Sorted, because `TagPicker` emits its selection in click order while
+        // `useAutosave` diffs with JSON.stringify: an unsorted array would make
+        // toggling a tag off and back on look like a permanent unsaved edit and
+        // re-save on every later keystroke.
+        tagIds: [...finding.tags.map((t) => t.id)].sort((a, b) => a - b),
         readyToReport: finding.readyToReport,
         severity: finding.severity ?? '',
         cvssVector: finding.cvssVector,
@@ -120,6 +165,9 @@ export function FindingDetailPage() {
   // Autosave the whole finding form. The CVSS calculator / severity picker set
   // vector+score+severity together, which is just another form change and saves
   // fine. Title is required; a blank title parks at `unsaved` and never saves.
+  // A tag toggle is an ordinary form change too, so it saves after the usual
+  // 800 ms debounce and bumps the finding's `updatedAt` (and therefore its
+  // position under the `updated` sort key) — which is correct, it is a real edit.
   const { status, flush } = useAutosave<FindingForm>({
     value: form,
     baseline,
@@ -134,6 +182,7 @@ export function FindingDetailPage() {
         readyToReport: v.readyToReport,
         iso21434Refs: v.iso21434Refs,
         unr155Refs: v.unr155Refs,
+        tagIds: v.tagIds,
       };
       if (v.kind === 'weakness') {
         // Weaknesses carry the impact/remediation/effort and a severity or CVSS.
@@ -165,6 +214,8 @@ export function FindingDetailPage() {
 
   if (isLoading) return <Spinner size={26} />;
   if (!finding) return <p className="text-danger">Finding not found.</p>;
+  // Fetched, but the fresh-row seed above has not landed yet (see its comment).
+  if (!baseline) return <Spinner size={26} />;
 
   // Read-only pattern: inputs disable when the user can't write.
   const readOnlyTitle = canWrite ? undefined : READ_ONLY_TITLE;
@@ -294,6 +345,23 @@ export function FindingDetailPage() {
             />
           </Field>
         </div>
+
+        <Field label="Tags" hint="The engagement's tags — the same ones evidence uses.">
+          <TagPicker
+            tags={tags ?? []}
+            selectedIds={form.tagIds}
+            // Sorted so the autosave diff is order-insensitive: TagPicker builds
+            // its next value from a Set, so click order would otherwise leak into
+            // the form state and keep it permanently dirty.
+            onChange={(ids) =>
+              setForm((prev) => ({ ...prev, tagIds: [...ids].sort((a, b) => a - b) }))
+            }
+            onCreateTag={onCreateTag}
+            disabled={!canWrite}
+            title={readOnlyTitle}
+            emptyHint="No tags in this engagement yet."
+          />
+        </Field>
 
         {isWeakness && (
           <>

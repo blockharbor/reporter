@@ -9,6 +9,7 @@ import {
   ENGAGEMENT_EXPORT_BLOB_PREFIX,
   ENGAGEMENT_EXPORT_DATA_ENTRY,
   ENGAGEMENT_EXPORT_MANIFEST_ENTRY,
+  ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS,
   SCRIPT_NOT_TEXT_REASON,
   slugSchema,
   type EngagementImportResult,
@@ -135,6 +136,12 @@ async function seedEngagement() {
   const tag = await app.db.tag.create({
     data: { engagementId: eng.id, name: 'can', colorName: 'blue' },
   });
+  // A second tag, so the weakness below can carry two: the finding join draws on
+  // the same pool evidence does, and the round trip has to bring both names back
+  // without minting a third tag row.
+  const uds = await app.db.tag.create({
+    data: { engagementId: eng.id, name: 'uds', colorName: 'green' },
+  });
 
   // The screenshot and its thumbnail are byte-identical, so the export collapses
   // them into ONE archive entry — the import must still give them separate keys.
@@ -214,6 +221,7 @@ async function seedEngagement() {
       unr155Refs: ['7.3.3'],
       readyToReport: true,
       position: 0,
+      tags: { create: [{ tagId: tag.id }, { tagId: uds.id }] },
       evidence: {
         create: [
           { evidenceId: parent.id, position: 0, caption: 'step one', inPath: true },
@@ -321,7 +329,20 @@ async function seedEngagement() {
     },
   });
 
-  return { users, eng, tag, parent, child, excluded, comment, finding, strength, goal, report };
+  return {
+    users,
+    eng,
+    tag,
+    uds,
+    parent,
+    child,
+    excluded,
+    comment,
+    finding,
+    strength,
+    goal,
+    report,
+  };
 }
 
 /** Download the export as bytes (as a site admin, who reaches every engagement). */
@@ -369,6 +390,7 @@ function loadCopy(slug: string) {
         orderBy: { position: 'asc' },
         include: {
           category: true,
+          tags: { include: { tag: { select: { name: true } } }, orderBy: { tag: { name: 'asc' } } },
           evidence: { orderBy: [{ inPath: 'desc' }, { position: 'asc' }] },
         },
       },
@@ -409,7 +431,8 @@ describe('full engagement import', () => {
       targets: 1,
       activities: 1,
       goals: 2,
-      tags: 1,
+      // Two tag rows — the finding's join adds applications, never tags.
+      tags: 2,
       evidence: 3,
       evidenceComments: 1,
       // The unused, soft-deleted category travels too.
@@ -460,10 +483,12 @@ describe('full engagement import', () => {
     expect(copy.softwareTested).toEqual([{ name: 'fw', version: '1.2' }]);
     expect(copy.proposalImport).toEqual({ devices: [{ name: 'Head unit' }] });
 
-    // Tags: a fresh row for the new engagement, same name and color.
-    expect(copy.tags).toHaveLength(1);
-    expect(copy.tags[0]).toMatchObject({ name: 'can', colorName: 'blue' });
-    expect(copy.tags[0]!.id).not.toBe(seeded.tag.id);
+    // Tags: fresh rows for the new engagement, same names and colors.
+    expect(copy.tags).toHaveLength(2);
+    const can = copy.tags.find((t) => t.name === 'can')!;
+    expect(can).toMatchObject({ name: 'can', colorName: 'blue' });
+    expect(can.id).not.toBe(seeded.tag.id);
+    expect(copy.tags.find((t) => t.name === 'uds')).toMatchObject({ colorName: 'green' });
 
     // Evidence: fresh uuids, the parent→child link rebuilt, tags re-attached,
     // authorship matched by email, and the exclusion restored.
@@ -518,13 +543,20 @@ describe('full engagement import', () => {
       [false, false, ''],
     ]);
     expect(strength.kind).toBe('strength');
+    // The finding's tags travel by name and resolve against the copy's own tag
+    // rows — the same two names, pointing at the new ids, and nothing on the
+    // strength, which had none.
+    expect(weakness.tags.map((t) => t.tag.name)).toEqual(['can', 'uds']);
+    expect(weakness.tags.map((t) => t.tagId)).toContain(can.id);
+    expect(weakness.tags.map((t) => t.tagId)).not.toContain(seeded.tag.id);
+    expect(strength.tags).toEqual([]);
 
     // The goal tree, rebuilt level by level, with links in both directions.
     const target = copy.targets[0]!;
     const activity = target.activities[0]!;
     expect(target).toMatchObject({ name: 'Head unit', description: 'IVI' });
     expect(activity).toMatchObject({ name: 'CAN fuzzing', category: 'Network' });
-    expect(activity.tag?.id).toBe(copy.tags[0]!.id);
+    expect(activity.tag?.id).toBe(can.id);
     expect(activity.goals.map((g) => [g.title, g.status, g.isRetest, g.notes])).toEqual([
       ['Enumerate services', 'in_progress', false, ''],
       ['Retest W1-01', 'not_started', true, 'from v1'],
@@ -649,6 +681,101 @@ describe('full engagement import', () => {
     expect(screenshot.commentThread[0]!.authorId).toBeNull();
     // A matched author still resolves, so this is a per-email decision.
     expect(copy.evidence.find((e) => e.title === 'Follow-up')!.lastEditedById).not.toBeNull();
+  });
+
+  it('drops a finding tag the file never defines, counts it, and still imports', async () => {
+    await seedEngagement();
+    const cookie = await loginCookie(app, 'admin@test.local', 'password123');
+    const archive = await exportArchive(cookie);
+
+    // A hand-edited file: the weakness names a tag that is in nobody's `tags`
+    // list. The export can't produce this, but a restore from a file someone
+    // trimmed by hand can, and the loss is invisible at render time — so it has
+    // to be counted rather than failed or silently zeroed.
+    const edited = await rewriteZip(archive, (files, names) => {
+      const data = JSON.parse(files.get(ENGAGEMENT_EXPORT_DATA_ENTRY)!.toString('utf8'));
+      const weakness = data.findings.find(
+        (f: { title: string }) => f.title === 'Open diagnostic session',
+      );
+      weakness.tagNames = ['ghost'];
+      files.set(ENGAGEMENT_EXPORT_DATA_ENTRY, Buffer.from(JSON.stringify(data)));
+      return names;
+    });
+
+    const res = await importArchive(cookie, edited);
+    expect(res.statusCode).toBe(200);
+    const result = res.json<EngagementImportResult>();
+    expect(result.dropped.unknownTagRefs).toBe(1);
+    // No tag row was minted for the unknown name.
+    expect(result.created.tags).toBe(2);
+
+    const copy = await loadCopy(result.engagement.slug);
+    expect(copy.tags.map((t) => t.name).sort()).toEqual(['can', 'uds']);
+    const weakness = copy.findings.find((f) => f.title === 'Open diagnostic session')!;
+    expect(weakness.tags).toEqual([]);
+  });
+
+  it('imports a backup taken before findings had tags', async () => {
+    await seedEngagement();
+    const cookie = await loginCookie(app, 'admin@test.local', 'password123');
+    const archive = await exportArchive(cookie);
+
+    // The shape every backup on disk had before this feature: no `tagNames` key
+    // on any finding, and the older version stamp in both the records and the
+    // manifest. This is the file the `.default([])` on `tagNames` and the
+    // conditional export stamp exist to keep importable — so it is asserted
+    // directly rather than inferred from a fresh export, which always writes the
+    // key.
+    const legacy = await rewriteZip(archive, (files, names) => {
+      const data = JSON.parse(files.get(ENGAGEMENT_EXPORT_DATA_ENTRY)!.toString('utf8'));
+      for (const f of data.findings) delete f.tagNames;
+      data.schemaVersion = ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS;
+      files.set(ENGAGEMENT_EXPORT_DATA_ENTRY, Buffer.from(JSON.stringify(data)));
+      const manifest = JSON.parse(files.get(ENGAGEMENT_EXPORT_MANIFEST_ENTRY)!.toString('utf8'));
+      manifest.schemaVersion = ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS;
+      files.set(ENGAGEMENT_EXPORT_MANIFEST_ENTRY, Buffer.from(JSON.stringify(manifest)));
+      return names;
+    });
+
+    const res = await importArchive(cookie, legacy);
+    expect(res.statusCode).toBe(200);
+    const result = res.json<EngagementImportResult>();
+    // Nothing was dropped: a missing key is "no tags", not a reference to one.
+    expect(result.dropped.unknownTagRefs).toBe(0);
+
+    const copy = await loadCopy(result.engagement.slug);
+    // Every finding comes back untagged — the weakness included, which the source
+    // had tagged. Evidence tags are a different field and still travel.
+    expect(copy.findings.every((f) => f.tags.length === 0)).toBe(true);
+    expect(copy.evidence.find((e) => e.title === 'Screenshot')!.tags).toHaveLength(1);
+  });
+
+  it('dedupes a tag named twice on one finding instead of failing the import', async () => {
+    await seedEngagement();
+    const cookie = await loginCookie(app, 'admin@test.local', 'password123');
+    const archive = await exportArchive(cookie);
+
+    // The export can't write this, but a hand-edited file can; without the
+    // importer's per-finding dedup the bulk insert would violate the join's
+    // composite primary key and roll back the entire engagement.
+    const edited = await rewriteZip(archive, (files, names) => {
+      const data = JSON.parse(files.get(ENGAGEMENT_EXPORT_DATA_ENTRY)!.toString('utf8'));
+      const weakness = data.findings.find(
+        (f: { title: string }) => f.title === 'Open diagnostic session',
+      );
+      weakness.tagNames = ['can', 'can', 'uds'];
+      files.set(ENGAGEMENT_EXPORT_DATA_ENTRY, Buffer.from(JSON.stringify(data)));
+      return names;
+    });
+
+    const res = await importArchive(cookie, edited);
+    expect(res.statusCode).toBe(200);
+    const result = res.json<EngagementImportResult>();
+    expect(result.dropped.duplicates).toBe(1);
+
+    const copy = await loadCopy(result.engagement.slug);
+    const weakness = copy.findings.find((f) => f.title === 'Open diagnostic session')!;
+    expect(weakness.tags.map((t) => t.tag.name).sort()).toEqual(['can', 'uds']);
   });
 
   it('rejects a blob whose bytes do not match its entry name', async () => {

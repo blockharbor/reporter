@@ -49,6 +49,8 @@ export function ActiveFindingFilterChips({
     onChange({ ...filter, kinds: filter.kinds.filter((x) => x !== k) });
   const removeCategory = (c: string) =>
     onChange({ ...filter, categories: filter.categories.filter((x) => x !== c) });
+  const removeTag = (t: string) =>
+    onChange({ ...filter, tags: filter.tags.filter((x) => x !== t) });
   const removeEffort = (e: FixEffort) =>
     onChange({ ...filter, fixEfforts: filter.fixEfforts.filter((x) => x !== e) });
   const removeTarget = (t: string) =>
@@ -93,6 +95,9 @@ export function ActiveFindingFilterChips({
           onRemove={() => onChange({ ...filter, uncategorized: false })}
         />
       )}
+      {filter.tags.map((t) => (
+        <RemovableChip key={`tag-${t}`} label={`Tag: ${t}`} onRemove={() => removeTag(t)} />
+      ))}
       {filter.readyToReport !== undefined && (
         <RemovableChip
           label={filter.readyToReport ? 'Ready to report' : 'Not ready to report'}

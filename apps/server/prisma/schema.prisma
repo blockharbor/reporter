@@ -414,6 +414,7 @@ model Tag {
 
   engagement Engagement       @relation(fields: [engagementId], references: [id], onDelete: Cascade)
   evidence   EvidenceTag[]
+  findings   FindingTag[]
   activities TargetActivity[]
 
   @@unique([engagementId, name])
@@ -689,6 +690,7 @@ model Finding {
   category   FindingCategory?  @relation(fields: [categoryId], references: [id])
   evidence   EvidenceFinding[]
   goals      GoalFinding[]
+  tags       FindingTag[]
 
   @@index([engagementId, position])
   @@map("findings")
@@ -704,6 +706,24 @@ model EvidenceTag {
   @@id([evidenceId, tagId])
   @@index([tagId])
   @@map("evidence_tags")
+}
+
+/// Which of the engagement's tags are on a finding. Deliberately the same `Tag`
+/// pool evidence draws from (`EvidenceTag`) rather than a second vocabulary: a
+/// label means the same thing on a finding as on the evidence behind it, and the
+/// engagement's Tags settings stays the one place labels are created, ordered and
+/// deleted. Cascade on both sides, as there: deleting the finding or the tag drops
+/// the link, and the Settings delete confirmation counts findings for that reason.
+model FindingTag {
+  findingId Int @map("finding_id")
+  tagId     Int @map("tag_id")
+
+  finding Finding @relation(fields: [findingId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([findingId, tagId])
+  @@index([tagId])
+  @@map("finding_tags")
 }
 
 model EvidenceFinding {

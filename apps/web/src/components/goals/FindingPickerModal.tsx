@@ -9,6 +9,7 @@ import {
   Modal,
   SeverityBadge,
   Spinner,
+  TagChip,
   useToast,
 } from '@reporter/ui';
 import { FINDING_KIND_LABELS, type Finding } from '@reporter/shared';
@@ -162,6 +163,16 @@ function FindingRow({
           {f.numGoals > 0 && ` · Goals (${f.numGoals})`}
           {f.numRecommendations > 0 && ` · Recommendations (${f.numRecommendations})`}
         </p>
+        {/* Chips get their own wrapping row rather than joining the subtitle,
+            which is a single `truncate` line already carrying up to four facts
+            and would clip them on a narrow viewport. */}
+        {f.tags.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {f.tags.map((t) => (
+              <TagChip key={t.id} name={t.name} colorName={t.colorName} />
+            ))}
+          </div>
+        )}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         {f.kind === 'strength' ? (

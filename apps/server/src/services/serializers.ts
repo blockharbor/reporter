@@ -274,6 +274,12 @@ export function serializeFindingEvidence(
 
 type FindingWithRelations = DbFinding & {
   category: FindingCategory | null;
+  /**
+   * The finding's tags, from `findingInclude`'s `tags: { include: { tag: true } }`.
+   * Required, not optional, for the same reason `evidence` below is: a caller that
+   * omitted the include would otherwise report every finding as untagged.
+   */
+  tags: { tag: DbTag }[];
   /** Link counts from the route's `findingInclude` (attached evidence, linked goals). */
   _count?: { evidence: number; goals: number };
   /**
@@ -343,6 +349,9 @@ export function serializeFinding(
     unr155Refs: (f.unr155Refs as unknown as string[]) ?? [],
     remediation: f.remediation,
     category: f.category?.category ?? null,
+    // No usage count: a count on a tag attached to a finding would mean nothing
+    // here, exactly as on evidence.
+    tags: f.tags.map((ft) => serializeTag(ft.tag)),
     severity: f.severity,
     cvssVector: f.cvssVector,
     cvssScore: f.cvssScore,

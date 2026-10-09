@@ -37,6 +37,7 @@ function finding(partial: Partial<Finding> & { uuid: string }): Finding {
     numEvidenceInReport: 0,
     numGoals: 0,
     numRecommendations: 0,
+    tags: [],
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...partial,
@@ -63,6 +64,10 @@ describe('filterFindings', () => {
       numEvidence: 3,
       numRecommendations: 2,
       iso21434Refs: ['iso-15-04'],
+      tags: [
+        { id: 1, name: 'CAN bus', colorName: 'red' },
+        { id: 2, name: 'Infotainment, rear', colorName: 'blue' },
+      ],
     }),
     finding({
       uuid: 'b',
@@ -83,6 +88,7 @@ describe('filterFindings', () => {
       fixEffort: 'low',
       numEvidence: 1,
       numGoals: 2,
+      tags: [{ id: 1, name: 'CAN bus', colorName: 'red' }],
     }),
   ];
 
@@ -143,6 +149,30 @@ describe('filterFindings', () => {
     expect(uuids(filterFindings(findings, filter({ unr155: 'none' })))).toEqual(['a', 'c']);
     expect(uuids(filterFindings(findings, filter({ iso21434Refs: ['iso-15-04'] })))).toEqual(['a']);
     expect(uuids(filterFindings(findings, filter({ unr155Refs: ['iso-15-04'] })))).toEqual([]);
+  });
+
+  it('filters on tag names, OR-ing within the facet', () => {
+    expect(uuids(filterFindings(findings, filter({ tags: ['CAN bus'] })))).toEqual(['a', 'c']);
+    expect(uuids(filterFindings(findings, filter({ tags: ['Infotainment, rear'] })))).toEqual([
+      'a',
+    ]);
+    // Two names: either one is enough, so a finding carrying only one still matches.
+    expect(
+      uuids(filterFindings(findings, filter({ tags: ['Infotainment, rear', 'CAN bus'] }))),
+    ).toEqual(['a', 'c']);
+    // A name nothing carries (a deleted tag from a stale link) matches nothing,
+    // rather than being ignored and silently widening the list.
+    expect(uuids(filterFindings(findings, filter({ tags: ['Gone'] })))).toEqual([]);
+    expect(isFilterActive(filter({ tags: ['CAN bus'] }))).toBe(true);
+  });
+
+  it('AND-s the tag facet with the others', () => {
+    expect(
+      uuids(filterFindings(findings, filter({ tags: ['CAN bus'], severities: ['critical'] }))),
+    ).toEqual(['c']);
+    expect(
+      uuids(filterFindings(findings, filter({ tags: ['CAN bus'], kinds: ['strength'] }))),
+    ).toEqual([]);
   });
 });
 
@@ -266,6 +296,13 @@ describe('deriveFindingFacets', () => {
     expect(facets.iso21434Refs).toEqual(['iso-09-cs-goals', 'iso-15-04', 'iso-legacy-id']);
     expect(facets.unr155Refs).toEqual(['unr155-7.3.4']);
   });
+
+  it('does not derive a tag facet — the option list comes from the engagement, not the findings', () => {
+    const facets = deriveFindingFacets([
+      finding({ uuid: 'a', tags: [{ id: 1, name: 'CAN bus', colorName: 'red' }] }),
+    ]);
+    expect(facets).toEqual({ targets: [], iso21434Refs: [], unr155Refs: [] });
+  });
 });
 
 describe('findings URL params', () => {
@@ -277,6 +314,7 @@ describe('findings URL params', () => {
       kinds: ['weakness'],
       categories: ['Network, wired', 'Hardware'],
       uncategorized: true,
+      tags: ['CAN bus'],
       readyToReport: false,
       fixEfforts: ['low'],
       hasEvidence: true,
@@ -371,5 +409,28 @@ describe('findings URL params', () => {
       'ECU, gateway',
       'Head unit',
     ]);
+  });
+
+  it('repeats the tag key so a comma inside a tag name survives, and omits it when empty', () => {
+    const params = writeFindingsParams(
+      new URLSearchParams('tab=findings'),
+      filter({ tags: ['CAN bus', 'Infotainment, rear'] }),
+      DEFAULT_SORT,
+    );
+    // One `tag` entry per name — a comma-joined value would split the second
+    // name in two on the way back in.
+    expect(params.getAll('tag')).toEqual(['CAN bus', 'Infotainment, rear']);
+    expect(parseFindingsParams(params).filter.tags).toEqual(['CAN bus', 'Infotainment, rear']);
+    // A param this page does not own rides along untouched.
+    expect(params.get('tab')).toBe('findings');
+
+    const none = writeFindingsParams(
+      new URLSearchParams('tab=findings'),
+      EMPTY_FILTER,
+      DEFAULT_SORT,
+    );
+    expect(none.has('tag')).toBe(false);
+    expect(none.toString()).toBe('tab=findings');
+    expect(parseFindingsParams(none).filter.tags).toEqual([]);
   });
 });

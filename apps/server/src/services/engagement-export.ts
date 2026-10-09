@@ -57,6 +57,8 @@
  *    survives the round trip rather than existing only as a name on a finding.
  *  - EvidenceFinding — as each finding's `evidenceLinks`, keeping `inPath`,
  *    `position` and `caption` (for an Attack Path step the caption *is* content).
+ *  - FindingTag — as each finding's `tagNames`, from the same engagement `Tag`
+ *    pool as `EvidenceTag` above. Its presence is what bumps the stamp to v2.
  *  - SavedQuery — the engagement's saved timeline/findings queries.
  *  - GeneratedReport — the report history **and** the stored artifact bytes.
  *
@@ -112,13 +114,14 @@ import { createHash } from 'node:crypto';
 import archiver from 'archiver';
 import type { FastifyInstance } from 'fastify';
 import type { Engagement as EngagementRow } from '@prisma/client';
-import { TAG_ORDER_BY } from './tags.js';
+import { FINDING_TAG_ORDER_BY, TAG_ORDER_BY } from './tags.js';
 import {
   ENGAGEMENT_EXPORT_BLOB_PREFIX,
   ENGAGEMENT_EXPORT_DATA_ENTRY,
   ENGAGEMENT_EXPORT_FORMAT,
   ENGAGEMENT_EXPORT_MANIFEST_ENTRY,
   ENGAGEMENT_EXPORT_VERSION,
+  ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS,
   engagementExportManifestSchema,
   engagementExportSchema,
   reportConfigSchema,
@@ -337,6 +340,9 @@ export async function buildEngagementExport(
       orderBy: [{ position: 'asc' }, { id: 'asc' }],
       include: {
         category: { select: { category: true } },
+        // Curated order, so the same database state always produces the same
+        // bytes — every other collection in this file is explicitly ordered too.
+        tags: { select: { tag: { select: { name: true } } }, orderBy: FINDING_TAG_ORDER_BY },
         // Same ordering the report and the findings export use: Attack Path
         // first, then each bucket by its own position.
         evidence: {
@@ -412,8 +418,16 @@ export async function buildEngagementExport(
     };
   });
 
+  // Conditional stamp — see ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS. A
+  // backup whose findings are all untagged has nothing a v1 reader would strip,
+  // so it keeps the older stamp and keeps importing on a pre-finding-tags server.
+  // Stamped once and used for BOTH the records and the manifest: the importer
+  // asserts the version on each, so the two must never disagree.
+  const schemaVersion = findingRows.some((f) => f.tags.length > 0)
+    ? ENGAGEMENT_EXPORT_VERSION
+    : ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS;
   const data: EngagementExport = engagementExportSchema.parse({
-    schemaVersion: ENGAGEMENT_EXPORT_VERSION,
+    schemaVersion,
     exportedAt: exportedAt.toISOString(),
     engagement: exportEngagement(eng),
     tags,
@@ -469,6 +483,7 @@ export async function buildEngagementExport(
       position: f.position,
       createdAt: f.createdAt.toISOString(),
       updatedAt: f.updatedAt.toISOString(),
+      tagNames: f.tags.map((t) => t.tag.name),
       evidenceLinks: f.evidence.map((l) => ({
         evidenceUuid: l.evidence.uuid,
         position: l.position,
@@ -494,7 +509,7 @@ export async function buildEngagementExport(
 
   const manifest: EngagementExportManifest = engagementExportManifestSchema.parse({
     format: ENGAGEMENT_EXPORT_FORMAT,
-    schemaVersion: ENGAGEMENT_EXPORT_VERSION,
+    schemaVersion,
     exportedAt: data.exportedAt,
     engagement: { slug: eng.slug, name: eng.name },
     counts: {

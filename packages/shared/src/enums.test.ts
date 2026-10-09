@@ -6,7 +6,9 @@ import {
   EVIDENCE_TYPE_EXTENSIONS,
   EVIDENCE_TYPE_ICONS,
   EVIDENCE_TYPE_LABELS,
+  REPORT_SECTION_HINTS,
   REPORT_SECTION_ITEMS,
+  REPORT_SECTION_SAMPLE,
   SCRIPT_INTERPRETER_EXTENSIONS,
   evidenceFileExtension,
   isEditableTextEvidence,
@@ -190,6 +192,52 @@ describe('REPORT_SECTION_ITEMS.assessmentExecution', () => {
       expect(item.label).toBeTruthy();
       expect(item.sample).toBeTruthy();
     }
+  });
+});
+
+describe('REPORT_SECTION_ITEMS.detailedFindings', () => {
+  const items = REPORT_SECTION_ITEMS.detailedFindings ?? [];
+
+  /*
+   * The list order is the configurator's row order, and the row order mirrors the
+   * card: `tags` goes first because the chips render first — directly under the
+   * meta line, above Description — so an author scanning the checkboxes top to
+   * bottom walks the card top to bottom.
+   */
+  it('lists tags first, in card order', () => {
+    expect(items.map((i) => i.key)).toEqual([
+      'tags',
+      'impact',
+      'standards',
+      'remediation',
+      'recommendations',
+      'attackPath',
+      'attachedEvidence',
+    ]);
+  });
+
+  /**
+   * Absent means ON: a section item the stored configuration does not mention
+   * renders. That is what makes `tags` an opt-out in the report without touching
+   * a single saved config — but it also means a key phrased as a suppression
+   * ("hideTags", "noTags") would read as "suppression enabled" for every
+   * configuration written before it existed, and ship as a silent content change
+   * to every existing engagement's deliverable. So every key has to name content
+   * that *renders*, and carry the label and sample the configurator shows.
+   */
+  it('phrases every key as content shown, never as a suppression', () => {
+    for (const item of items) {
+      expect(item.key).not.toMatch(/^(hide|no|omit|exclude|suppress)/i);
+      expect(item.label).toBeTruthy();
+      expect(item.sample).toBeTruthy();
+    }
+  });
+
+  // The section-level copy is what an author reads before expanding the rows, so
+  // it has to admit that tags are part of the card now.
+  it('mentions tags in the section hint and sample', () => {
+    expect(REPORT_SECTION_HINTS.detailedFindings).toMatch(/\btags\b/i);
+    expect(REPORT_SECTION_SAMPLE.detailedFindings).toMatch(/\btags\b/i);
   });
 });
 

@@ -128,6 +128,24 @@ async function evidenceTagNames(cookie: string, uuid: string): Promise<string[]>
   return (res.json().tags as { name: string }[]).map((t) => t.name);
 }
 
+/** A finding carrying the given tags, written straight to the DB. */
+async function createFindingWith(engagementId: number, title: string, tagIds: number[]) {
+  return app.db.finding.create({
+    data: {
+      engagementId,
+      title,
+      tags: { create: tagIds.map((tagId) => ({ tagId })) },
+    },
+  });
+}
+
+/** The tag chip names a finding comes back with over the web plane. */
+async function findingTagNames(cookie: string, uuid: string): Promise<string[]> {
+  const res = await get(`/web/engagements/op1/findings/${uuid}`, cookie);
+  if (res.statusCode !== 200) throw new Error(`finding ${uuid}: ${res.statusCode} ${res.body}`);
+  return (res.json().tags as { name: string }[]).map((t) => t.name);
+}
+
 /** Create a Goals target + activity; the activity mints its own correlation tag. */
 async function createActivity(cookie: string, name: string) {
   const target = (
@@ -502,8 +520,8 @@ describe('usage counts', () => {
     const alpha = rows.find((r) => r.id === t.id)!;
     expect(alpha.evidenceCount).toBe(2);
     expect(alpha.usageCount).toBe(2);
-    // Absent until the finding-tags slice lands; readers treat absent as zero.
-    expect(alpha.findingCount).toBeUndefined();
+    // No finding carries alpha here; the finding side is pinned in the next case.
+    expect(alpha.findingCount).toBe(0);
     expect(alpha.activityNames).toEqual([]);
 
     expect(rows.find((r) => r.id === unused.id)).toMatchObject({
@@ -515,6 +533,35 @@ describe('usage counts', () => {
       name: 'Recon',
       evidenceCount: 0,
       activityNames: ['Recon'],
+    });
+  });
+
+  it('counts findings separately and sums both into usageCount', async () => {
+    const { cookie, users, eng } = await setup();
+    const t = await createTag(cookie, 'alpha');
+    await createEvidence(eng.id, users.writer.id, 'one', [t.id]);
+    await createEvidence(eng.id, users.writer.id, 'two', [t.id]);
+    await createFindingWith(eng.id, 'F1', [t.id]);
+    await createFindingWith(eng.id, 'F2', [t.id]);
+    await createFindingWith(eng.id, 'F3', [t.id]);
+    // A finding with no tags must not be counted anywhere.
+    await createFindingWith(eng.id, 'untagged', []);
+    const findingsOnly = await createTag(cookie, 'findings-only');
+    await createFindingWith(eng.id, 'F4', [findingsOnly.id]);
+
+    const rows = await listTags(cookie);
+    // The split is what the delete/merge/unapply confirmations quote — "2
+    // evidence and 3 findings" — and `usageCount` stays the total every older
+    // reader of that field expects.
+    expect(rows.find((r) => r.id === t.id)).toMatchObject({
+      evidenceCount: 2,
+      findingCount: 3,
+      usageCount: 5,
+    });
+    expect(rows.find((r) => r.id === findingsOnly.id)).toMatchObject({
+      evidenceCount: 0,
+      findingCount: 1,
+      usageCount: 1,
     });
   });
 });
@@ -554,6 +601,48 @@ describe('merge', () => {
     expect(await evidenceTagNames(cookie, c.uuid)).toEqual(['t2']);
     // No stray join rows survived the source's deletion.
     expect(await app.db.evidenceTag.count({ where: { tagId: t1.id } })).toBe(0);
+  });
+
+  it('moves finding tags the same way, skipping a finding that already carries both', async () => {
+    const { cookie, users, eng } = await setup();
+    const t1 = await createTag(cookie, 't1');
+    const t2 = await createTag(cookie, 't2');
+    const a = await createFindingWith(eng.id, 'A', [t1.id]);
+    const b = await createFindingWith(eng.id, 'B', [t1.id, t2.id]);
+    const c = await createFindingWith(eng.id, 'C', [t2.id]);
+    // One piece of evidence on the source too, so the two tallies are visibly
+    // separate rather than one being a copy of the other.
+    const ev = await createEvidence(eng.id, users.writer.id, 'E', [t1.id]);
+
+    const res = await post(`/web/engagements/op1/tags/${t1.id}/merge`, cookie, {
+      intoTagId: t2.id,
+    });
+    expect(res.statusCode).toBe(200);
+    // A re-point (`updateMany`) instead of a copy would violate the composite key
+    // on B and abort the whole merge.
+    expect(res.json()).toMatchObject({
+      movedEvidence: 1,
+      evidenceAlreadyTagged: 0,
+      movedFindings: 1,
+      findingsAlreadyTagged: 1,
+      repointedActivities: 0,
+      rewrittenTimelineSections: 0,
+    });
+    expect(res.json().tag).toMatchObject({
+      id: t2.id,
+      evidenceCount: 1,
+      findingCount: 3,
+      usageCount: 4,
+    });
+
+    expect(await tagNames(cookie)).toEqual(['t2']);
+    // Every finding ends with exactly one chip: the survivor, once.
+    expect(await findingTagNames(cookie, a.uuid)).toEqual(['t2']);
+    expect(await findingTagNames(cookie, b.uuid)).toEqual(['t2']);
+    expect(await findingTagNames(cookie, c.uuid)).toEqual(['t2']);
+    expect(await evidenceTagNames(cookie, ev.uuid)).toEqual(['t2']);
+    expect(await app.db.findingTag.count({ where: { tagId: t1.id } })).toBe(0);
+    expect(await app.db.findingTag.count()).toBe(3);
   });
 
   it("re-points an activity's correlation tag at the survivor instead of nulling it", async () => {
@@ -661,6 +750,34 @@ describe('unapply', () => {
     const row = await app.db.targetActivity.findUniqueOrThrow({ where: { id: activity.id } });
     expect(row.tagId).toBe(tagId);
   });
+
+  it('strips the tag from findings too, reporting them separately', async () => {
+    const { cookie, users, eng } = await setup();
+    const t = await createTag(cookie, 'alpha');
+    const other = await createTag(cookie, 'other');
+    const f1 = await createFindingWith(eng.id, 'F1', [t.id]);
+    const f2 = await createFindingWith(eng.id, 'F2', [other.id, t.id]);
+    const untouched = await createFindingWith(eng.id, 'F3', [other.id]);
+    await createEvidence(eng.id, users.writer.id, 'E', [t.id]);
+
+    const res = await post(`/web/engagements/op1/tags/${t.id}/unapply`, cookie, {});
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ evidenceCleared: 1, findingsCleared: 2 });
+
+    // The tag survives with nothing applied…
+    expect((await listTags(cookie)).find((r) => r.id === t.id)).toMatchObject({
+      name: 'alpha',
+      evidenceCount: 0,
+      findingCount: 0,
+      usageCount: 0,
+    });
+    // …each finding comes back untagged, and another tag on the same finding is
+    // left alone.
+    expect(await findingTagNames(cookie, f1.uuid)).toEqual([]);
+    expect(await findingTagNames(cookie, f2.uuid)).toEqual(['other']);
+    expect(await findingTagNames(cookie, untouched.uuid)).toEqual(['other']);
+    expect(await app.db.findingTag.count({ where: { tagId: t.id } })).toBe(0);
+  });
 });
 
 describe('delete', () => {
@@ -677,6 +794,24 @@ describe('delete', () => {
     expect(await evidenceTagNames(cookie, a.uuid)).toEqual([]);
     const row = await app.db.targetActivity.findUniqueOrThrow({ where: { id: activity.id } });
     expect(row.tagId).toBeNull();
+  });
+
+  it('cascades off a finding instead of blocking the delete', async () => {
+    const { cookie, eng } = await setup();
+    const t = await createTag(cookie, 'alpha');
+    const other = await createTag(cookie, 'other');
+    const f = await createFindingWith(eng.id, 'F', [t.id, other.id]);
+
+    // Without ON DELETE CASCADE on the join's tag_id, this would be the 500 every
+    // tag deletion hit the moment a finding used the tag.
+    const res = await del(`/web/engagements/op1/tags/${t.id}`, cookie);
+    expect(res.statusCode).toBe(200);
+
+    expect(await tagNames(cookie)).toEqual(['other']);
+    // The finding itself survives, minus the one chip.
+    expect(await findingTagNames(cookie, f.uuid)).toEqual(['other']);
+    expect(await app.db.findingTag.count({ where: { tagId: t.id } })).toBe(0);
+    expect(await app.db.findingTag.count({ where: { findingId: f.id } })).toBe(1);
   });
 
   it("drops the tag's name from the report timeline config and leaves everything else alone", async () => {

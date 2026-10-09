@@ -10,6 +10,54 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ### Added
 
+- **Findings can carry tags, drawn from the engagement's existing tag pool.** A
+  finding's Details card gained a **Tags** picker beside Category and Affected
+  target, the chips show on every finding card — including the one inside the
+  goal-linking picker, which renders the same card — and the Findings filter bar
+  gained a **Tags** facet that narrows the list to findings carrying any of the
+  selected labels, deep-linkable like every other findings filter. There is
+  deliberately no second vocabulary and no applies-to flag: a finding draws from
+  the same `Tag` rows evidence does, through a `finding_tags` join that mirrors
+  `evidence_tags` exactly, so a label means the same thing on a finding as on the
+  evidence behind it, chips follow the same curated order everywhere, and the
+  engagement's Settings tab stays the one place tags are created, ordered, merged
+  and deleted. Those settings actions now count findings too: the delete, merge
+  and unapply confirmations state "on 3 pieces of evidence and 2 findings", merge
+  carries a finding's tag onto the survivor, and unapply strips it from findings
+  as well. Tags travel in a full engagement backup as each finding's `tagNames`,
+  resolved back through the file's own tag list on import and counted into the
+  dropped-reference total when a file names a tag it never defines; a backup
+  whose findings are all untagged still carries the older export version stamp,
+  so it keeps importing on a server that predates the feature, while one that
+  does carry finding tags is refused there by version rather than imported with
+  the labels quietly stripped. The lighter findings-only export (`report.json`)
+  carries no tags, for findings or for evidence, and is unchanged. Because the
+  finding page autosaves rather than keeping a draft, toggling a tag is an edit
+  like any other: it saves after the usual pause and bumps the finding's
+  last-modified time.
+
+- **A finding's tags print on its card in the report's Detailed Findings section.**
+  Each detail card carries its tag chips directly under the Category · Affected
+  target line, in the same fixed twelve-swatch palette the app and the evidence
+  log already use, so the labels an assessor organizes a finding by travel into
+  the deliverable instead of stopping at the screen. Tag names print verbatim — a
+  tag called `_lateral_ move` reads as typed, never italicised — because a tag
+  name is typed into a plain field, not the markdown editor, and the report treats
+  the two differently on purpose. The chips are a **Tags** sub-item of Detailed
+  Findings (Reports → Configure → Detailed Findings, first in the list, where the
+  card renders them), and like every section sub-item it is absent-means-shown:
+  an engagement configured before this existed gains the chips in its next
+  report. That is deliberate and it is the one behaviour change here — turning
+  the sub-item off restores the previous card byte-for-byte, and the choice rides
+  along when a built-in report type is picked or a saved report template is
+  applied, so it can't be undone without the author touching the control that set
+  it. A finding with no tags prints nothing at all — no empty row, no "No tags"
+  line, the same rule the evidence and linked-goals blocks follow — and a
+  strength's detail card shows its tags too, since a tag is not one of the
+  severity-shaped fields a strength card drops. The chips keep their exact colours
+  in the PDF rather than washing out, and stay with the card they belong to across
+  a page break.
+
 - **Tags are now fully manageable in an engagement's settings — renamed,
   recolored, reordered, merged, and stripped from everything at once.** Settings →
   Tags could only create and delete; the rename endpoint and its client hook had

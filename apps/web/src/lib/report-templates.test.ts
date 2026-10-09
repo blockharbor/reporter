@@ -130,6 +130,18 @@ describe('templateSanitizeWarning', () => {
     expect(templateSanitizeWarning(off, toggles({ scriptBodies: false }))).toBeNull();
   });
 
+  it('stays silent about a finding-tags toggle — a label is not withheld content', () => {
+    const hidden: SanitizeToggles = {
+      showEvidenceTimestamps: false,
+      showEvidenceOperators: false,
+      sections: [{ key: 'detailedFindings', enabled: true, options: { tags: false } }],
+    };
+    // `off` carries no options at all, so it reads as showing tags: this is a
+    // template that would turn them back on. Still null — a tag name is a label
+    // on content the report prints either way, not content kept out of it.
+    expect(templateSanitizeWarning(hidden, off)).toBeNull();
+  });
+
   it('reads a real configuration pair, not just the hand-built shape', () => {
     const suppressed = engagementConfig({
       sections: [{ key: 'assessmentExecution', enabled: true, options: { scriptBodies: false } }],

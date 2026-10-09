@@ -9,6 +9,7 @@ import {
 } from '@reporter/shared';
 import { HttpError, requireAuth, requireEngagementRole } from '../../auth/guards.js';
 import { REPORT_VISIBLE_EVIDENCE } from '../../helpers/report-visibility.js';
+import { FINDING_TAG_ORDER_BY } from '../../services/tags.js';
 import {
   evidenceInclude,
   recommendationCountsByFinding,
@@ -37,6 +38,11 @@ import {
 // them, and the detail route below replaces the `evidence` key of its response.
 const findingInclude = {
   category: true,
+  // A plain relation include, not a `_count`: the read shape carries the full tag
+  // objects, because every finding card renders the chips and the Findings page
+  // filters on them client-side over the fetched array. Ordered by the
+  // engagement's curated tag order, like the chips on an evidence row.
+  tags: { include: { tag: true }, orderBy: FINDING_TAG_ORDER_BY },
   evidence: { where: { evidence: REPORT_VISIBLE_EVIDENCE }, select: { evidenceId: true } },
   _count: { select: { evidence: true, goals: true } },
 } as const;
@@ -87,6 +93,16 @@ export async function findingRoutes(app: FastifyInstance): Promise<void> {
         where: { engagementId: eng.id },
         _max: { position: true },
       });
+      // Only attach tags that actually belong to this engagement — a foreign id is
+      // dropped rather than rejected, exactly as on evidence. Distinct by primary
+      // key, so a duplicated id in the payload collapses for free.
+      const validTags =
+        input.tagIds.length > 0
+          ? await app.db.tag.findMany({
+              where: { id: { in: input.tagIds }, engagementId: eng.id },
+              select: { id: true },
+            })
+          : [];
       const finding = await app.db.finding.create({
         data: {
           engagementId: eng.id,
@@ -101,6 +117,7 @@ export async function findingRoutes(app: FastifyInstance): Promise<void> {
           unr155Refs: input.unr155Refs,
           categoryId: await categoryIdFor(app, eng.id, input.category),
           position: (max._max.position ?? -1) + 1,
+          tags: { create: validTags.map((t) => ({ tagId: t.id })) },
         },
         include: findingInclude,
       });
@@ -217,10 +234,31 @@ export async function findingRoutes(app: FastifyInstance): Promise<void> {
         data.remediation = '';
       }
 
-      const updated = await app.db.finding.update({
-        where: { id: finding.id },
-        data,
-        include: findingInclude,
+      // The row and its tags move together: a join rewrite that failed after the
+      // row update would leave the finding saved with stale tags. (`categoryIdFor`
+      // above still upserts outside this transaction — pre-existing, and left
+      // alone so this stays about tags.)
+      const updated = await app.db.$transaction(async (tx) => {
+        await tx.finding.update({ where: { id: finding.id }, data });
+        // `if (body.tagIds)`, not `?.length`: an explicit `[]` must clear the tags.
+        // That is the set-replace contract, the same as on evidence.
+        if (body.tagIds) {
+          const valid = await tx.tag.findMany({
+            where: { id: { in: body.tagIds }, engagementId: eng.id },
+            select: { id: true },
+          });
+          await tx.findingTag.deleteMany({ where: { findingId: finding.id } });
+          await tx.findingTag.createMany({
+            data: valid.map((t) => ({ findingId: finding.id, tagId: t.id })),
+          });
+        }
+        // Read back inside the transaction: the update's own `include` would have
+        // been resolved before the join rewrite, so the response would carry the
+        // tags the finding had a moment ago.
+        return tx.finding.findUniqueOrThrow({
+          where: { id: finding.id },
+          include: findingInclude,
+        });
       });
       const recCounts = recommendationCountsByFinding(eng.strategicRecommendations);
       return serializeFinding(updated, slug, recCounts.get(updated.uuid) ?? 0);

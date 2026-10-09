@@ -209,12 +209,7 @@ describe('finding evidence buckets (attack path + attached evidence)', () => {
     return { cookie, evidence };
   }
 
-  const attach = (
-    cookie: string,
-    fUuid: string,
-    evidenceUuids: string[],
-    inPath?: boolean,
-  ) =>
+  const attach = (cookie: string, fUuid: string, evidenceUuids: string[], inPath?: boolean) =>
     app.inject({
       method: 'POST',
       url: `/web/engagements/op1/findings/${fUuid}/evidence`,
@@ -837,5 +832,199 @@ describe('finding strategic-recommendation counts', () => {
     expect(updated.numRecommendations).toBe(3);
     const created = await createFinding(cookie, 'Fresh');
     expect(created.numRecommendations).toBe(0);
+  });
+});
+
+describe('finding tags', () => {
+  // Tags are the engagement's own pool — the same rows evidence draws from — so
+  // every tag here goes through the web route and gets a real `position`. The
+  // chips on a finding follow that curated order (position, then name), NOT the
+  // alphabetical order the first draft of this feature used, so the fixture is
+  // deliberately created in an order that disagrees with the alphabet: `zeta`
+  // first, `alpha` second. An assertion that passes against name-sorting would
+  // put alpha first and fail here.
+  const createTag = (cookie: string, name: string) =>
+    app
+      .inject({
+        method: 'POST',
+        url: '/web/engagements/op1/tags',
+        headers: { ...WEB_HEADERS, cookie },
+        payload: { name, colorName: 'red' },
+      })
+      .then((r) => {
+        if (r.statusCode !== 201) throw new Error(`createTag ${name}: ${r.statusCode} ${r.body}`);
+        return r.json() as { id: number; name: string };
+      });
+
+  /** The create route with an explicit `tagIds` — `createFinding` above sends none. */
+  const createTagged = (cookie: string, title: string, tagIds: number[]) =>
+    app.inject({
+      method: 'POST',
+      url: '/web/engagements/op1/findings',
+      headers: { ...WEB_HEADERS, cookie },
+      payload: { title, description: '', category: null, tagIds },
+    });
+
+  type TaggedFinding = { uuid: string; title: string; tags: { id: number; name: string }[] };
+
+  const detail = (cookie: string, uuid: string) =>
+    app
+      .inject({ method: 'GET', url: `/web/engagements/op1/findings/${uuid}`, headers: { cookie } })
+      .then((r) => r.json() as TaggedFinding);
+
+  const list = (cookie: string) =>
+    app
+      .inject({ method: 'GET', url: '/web/engagements/op1/findings', headers: { cookie } })
+      .then((r) => r.json() as TaggedFinding[]);
+
+  const names = (f: TaggedFinding) => f.tags.map((t) => t.name);
+
+  it('creates an already-tagged finding, and the list and detail reads agree', async () => {
+    const { cookie } = await setup();
+    const zeta = await createTag(cookie, 'zeta');
+    const alpha = await createTag(cookie, 'alpha');
+
+    // Ids sent in alphabetical order; the response must come back in curated
+    // order regardless of how the caller listed them.
+    const res = await createTagged(cookie, 'Tagged at birth', [alpha.id, zeta.id]);
+    expect(res.statusCode).toBe(201);
+    const created = res.json() as TaggedFinding;
+    expect(names(created)).toEqual(['zeta', 'alpha']);
+    // Full tag objects, not bare ids: the card renders the chip straight from this.
+    expect(created.tags[0]).toMatchObject({ id: zeta.id, name: 'zeta', colorName: 'red' });
+
+    // All four read paths share one include; the two GETs must say the same thing
+    // the create response said.
+    expect(names(await detail(cookie, created.uuid))).toEqual(['zeta', 'alpha']);
+    const listed = (await list(cookie)).find((f) => f.uuid === created.uuid)!;
+    expect(names(listed)).toEqual(['zeta', 'alpha']);
+  });
+
+  it('PUT tagIds is set-replace: keeps only what was sent, and [] clears', async () => {
+    const { cookie } = await setup();
+    const zeta = await createTag(cookie, 'zeta');
+    const alpha = await createTag(cookie, 'alpha');
+    const f = (await createTagged(cookie, 'F', [zeta.id, alpha.id])).json() as TaggedFinding;
+    expect(names(f)).toEqual(['zeta', 'alpha']);
+
+    // Sending only alpha must REMOVE zeta — not append to it.
+    const kept = await update(cookie, f.uuid, { tagIds: [alpha.id] });
+    expect(kept.statusCode).toBe(200);
+    expect(names(kept.json())).toEqual(['alpha']);
+    expect(names(await detail(cookie, f.uuid))).toEqual(['alpha']);
+
+    // An explicit empty array is a clear, never a no-op: the user removed the last
+    // chip in the editor and expects it gone.
+    const cleared = await update(cookie, f.uuid, { tagIds: [] });
+    expect(cleared.statusCode).toBe(200);
+    expect(names(cleared.json())).toEqual([]);
+    expect(names(await detail(cookie, f.uuid))).toEqual([]);
+    expect(await app.db.findingTag.count()).toBe(0);
+  });
+
+  it('PUT without tagIds leaves the tags alone while applying the rest of the patch', async () => {
+    const { cookie } = await setup();
+    const zeta = await createTag(cookie, 'zeta');
+    const alpha = await createTag(cookie, 'alpha');
+    const f = (await createTagged(cookie, 'Before', [zeta.id, alpha.id])).json() as TaggedFinding;
+
+    // Omitted ≠ empty. A transaction that unconditionally rewrote the join would
+    // strip these two on every title edit.
+    const res = await update(cookie, f.uuid, { title: 'After' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().title).toBe('After');
+    expect(names(res.json())).toEqual(['zeta', 'alpha']);
+    expect(await app.db.findingTag.count({ where: { tagId: { in: [zeta.id, alpha.id] } } })).toBe(
+      2,
+    );
+  });
+
+  it('filters out a tag id that belongs to another engagement — dropped, not linked, not 400', async () => {
+    const { cookie } = await setup();
+    // A second engagement with its own tag. Created straight through Prisma: no
+    // route is needed, and the writer holds no role on it, which is the point —
+    // the id is a valid tag id that this engagement simply does not own.
+    const other = await app.db.engagement.create({
+      data: {
+        slug: 'op2',
+        name: 'Op Two',
+        tags: { create: { name: 'Foreign', colorName: 'blue' } },
+      },
+      include: { tags: true },
+    });
+    const foreign = other.tags[0]!;
+    const f = await createFinding(cookie, 'F');
+
+    const res = await update(cookie, f.uuid, { tagIds: [foreign.id] });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().tags).toEqual([]);
+    // Straight from the join table, so a leaked cross-engagement row cannot hide
+    // behind a serializer that happens to filter it out on the way to the wire.
+    expect(await app.db.findingTag.count()).toBe(0);
+
+    // The same filter on the create path.
+    const created = await createTagged(cookie, 'G', [foreign.id]);
+    expect(created.statusCode).toBe(201);
+    expect(created.json().tags).toEqual([]);
+    expect(await app.db.findingTag.count()).toBe(0);
+  });
+
+  it('collapses a duplicated id to one tag instead of tripping the composite key', async () => {
+    const { cookie } = await setup();
+    const alpha = await createTag(cookie, 'alpha');
+
+    // A `createMany` fed straight from the payload would violate `finding_tags`'
+    // primary key and 500 here, on both the create and the update path.
+    const created = await createTagged(cookie, 'F', [alpha.id, alpha.id]);
+    expect(created.statusCode).toBe(201);
+    expect(names(created.json())).toEqual(['alpha']);
+
+    const updated = await update(cookie, created.json().uuid, { tagIds: [alpha.id, alpha.id] });
+    expect(updated.statusCode).toBe(200);
+    expect(names(updated.json())).toEqual(['alpha']);
+    expect(await app.db.findingTag.count()).toBe(1);
+  });
+
+  it('deleting a tag cascades it off the finding rather than blocking the delete', async () => {
+    const { cookie } = await setup();
+    const zeta = await createTag(cookie, 'zeta');
+    const alpha = await createTag(cookie, 'alpha');
+    const f = (await createTagged(cookie, 'F', [zeta.id, alpha.id])).json() as TaggedFinding;
+
+    // Without ON DELETE CASCADE on the join's tag_id, every deletion of a tag in
+    // use on a finding would 500 the moment the feature shipped.
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/web/engagements/op1/tags/${zeta.id}`,
+      headers: { ...WEB_HEADERS, cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(names(await detail(cookie, f.uuid))).toEqual(['alpha']);
+    expect(await app.db.findingTag.count({ where: { tagId: zeta.id } })).toBe(0);
+    expect(await app.db.findingTag.count()).toBe(1);
+  });
+
+  it('a patch the schema rejects touches neither the row nor the join rows', async () => {
+    const { cookie } = await setup();
+    const zeta = await createTag(cookie, 'zeta');
+    const alpha = await createTag(cookie, 'alpha');
+    const f = (await createTagged(cookie, 'Keep me', [zeta.id])).json() as TaggedFinding;
+
+    // The patch carries a tag rewrite alongside a title the schema rejects. The
+    // 400 is raised by `updateFindingInput.parse` before any database access, so
+    // what this proves is that validation runs BEFORE the join rewrite — a
+    // refactor that moved the tag write ahead of parsing would leave `alpha`
+    // applied to a finding whose update was refused. It does NOT exercise the
+    // handler's transaction: no user-reachable payload fails inside it (tag ids
+    // are filtered, never rejected), so a mid-transaction rollback would need
+    // fault injection on the Prisma client to observe.
+    const res = await update(cookie, f.uuid, { title: '', tagIds: [alpha.id] });
+    expect(res.statusCode).toBe(400);
+
+    const after = await detail(cookie, f.uuid);
+    expect(after.title).toBe('Keep me');
+    expect(names(after)).toEqual(['zeta']);
+    const rows = await app.db.findingTag.findMany({ select: { tagId: true } });
+    expect(rows).toEqual([{ tagId: zeta.id }]);
   });
 });

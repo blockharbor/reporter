@@ -29,6 +29,7 @@ import {
   Modal,
   SeverityBadge,
   Spinner,
+  TagChip,
   useConfirm,
   useToast,
 } from '@reporter/ui';
@@ -328,6 +329,16 @@ function SortableFindingRow({
             {f.numGoals > 0 && ` · Goals (${f.numGoals})`}
             {f.numRecommendations > 0 && ` · Recommendations (${f.numRecommendations})`}
           </p>
+          {/* Chips get their own wrapping row rather than joining the subtitle,
+              which is a single `truncate` line already carrying up to four facts
+              and would clip them on a narrow viewport. */}
+          {f.tags.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {f.tags.map((t) => (
+                <TagChip key={t.id} name={t.name} colorName={t.colorName} />
+              ))}
+            </div>
+          )}
         </div>
         <div className="flex flex-shrink-0 items-center gap-2">
           {f.kind === 'strength' ? (
@@ -412,6 +423,7 @@ function CreateFindingModal({
         fixEffort: 'none',
         iso21434Refs: [],
         unr155Refs: [],
+        tagIds: [],
       });
       toast.success('Finding created');
       setKind('weakness');

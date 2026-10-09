@@ -52,8 +52,8 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
   const listInclude = {
     // Split counts: the delete, merge and unapply confirmations all state the
     // blast radius, and "3 evidence" reads very differently from "3 evidence and
-    // 11 findings". FINDING-TAGS: add `findings: true` here.
-    _count: { select: { evidence: true } },
+    // 11 findings".
+    _count: { select: { evidence: true, findings: true } },
     // Which Goals activities use this as their correlation tag — quoted as a hint
     // in the rename editor, because renaming the *activity* later mints a fresh
     // tag rather than following this one (`ensureActivityTag`).
@@ -64,9 +64,12 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
 
   function serializeListRow(t: ListRow) {
     const evidenceCount = t._count.evidence;
-    // FINDING-TAGS: `const findingCount = t._count.findings` and pass it through.
-    return serializeTag(t, evidenceCount, {
+    const findingCount = t._count.findings;
+    // `usageCount` stays the total, so every reader of that field means what it
+    // always meant; the split is what the confirmations quote.
+    return serializeTag(t, evidenceCount + findingCount, {
       evidenceCount,
+      findingCount,
       activityNames: t.activities.map((a) => a.name),
     });
   }

@@ -289,6 +289,9 @@ async function main() {
     data: {
       engagementId: eng.id,
       title: 'Privilege escalation via sudo misconfiguration',
+      // Tagged like the evidence behind it, so the demo shows finding tags on the
+      // cards, in the filter facet and on the report's detail card.
+      tags: { create: [{ tagId: tagByName.get('priv-esc')!.id }] },
       description:
         'A sudo rule allowed the low-priv user to run a shell as root without a password.',
       remediation:
@@ -316,6 +319,7 @@ async function main() {
     data: {
       engagementId: eng.id,
       title: 'Verbose error messages disclose stack traces',
+      tags: { create: [{ tagId: tagByName.get('recon')!.id }] },
       description: 'Unhandled exceptions return full stack traces to unauthenticated users.',
       categoryId: category?.id ?? null,
       severity: 'medium',

@@ -353,6 +353,17 @@ table.tbl td.title { color: var(--bh-black); font-weight: 500; }
 .finding-meta code { font-family: var(--font-mono); font-size: 12px; background: var(--bh-light-gray);
                      border-radius: 4px; padding: 1px 6px; color: var(--bh-black); }
 .finding-meta .sep { color: var(--stroke-light); margin: 0 8px; }
+/* A finding's own tag chips, under the meta line. Its own class rather than the
+   timeline's .tl-tags: the margin belongs to this card's rhythm, and .tl-tags is
+   the literal markup an Assessment Execution test asserts the absence of to prove
+   evidence tags are suppressed. break-after: avoid keeps the row with the
+   Description heading that follows it when a card is taller than one page and
+   Chromium has to ignore the card's break-inside: avoid. The chip colours already
+   print at full saturation: tagChip() writes the palette hexes inline and
+   print-color-adjust: exact is set on html and inherited. (No backticks in this
+   comment — the whole stylesheet is a template literal.) */
+.finding-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0;
+                break-inside: avoid; break-after: avoid; }
 .finding h4.sub { font-family: var(--font-cond); font-weight: 700; font-size: 12px; letter-spacing: 0.1em;
                   text-transform: uppercase; color: var(--fg-3); margin: 20px 0 8px; break-after: avoid; }
 /* Cross-reference lists under a finding (Detailed Findings): the related

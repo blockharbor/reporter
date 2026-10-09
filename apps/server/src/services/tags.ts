@@ -46,6 +46,12 @@ export const EVIDENCE_TAG_ORDER_BY: Prisma.EvidenceTagOrderByWithRelationInput[]
   { tag: { name: 'asc' } },
 ];
 
+/** And to the finding join rows: a finding's chips follow the same curated order. */
+export const FINDING_TAG_ORDER_BY: Prisma.FindingTagOrderByWithRelationInput[] = [
+  { tag: { position: 'asc' } },
+  { tag: { name: 'asc' } },
+];
+
 export const DUPLICATE_TAG_NAME = 'A tag with that name already exists';
 
 /**
@@ -214,11 +220,21 @@ export async function mergeTagInto(
       ).count
     : 0;
 
-  // FINDING-TAGS: once findings carry tags, copy `findingTag` rows here exactly as
-  // the evidence rows above. Until then findings cannot carry a tag, so zero is
-  // the truthful answer rather than a stub.
-  const srcFindingCount = 0;
-  const movedFindings = 0;
+  // The finding join rows, exactly as the evidence rows above: copied with
+  // skipDuplicates, so a finding already carrying both tags keeps a single chip.
+  const srcFindings = await tx.findingTag.findMany({
+    where: { tagId: source.id },
+    select: { findingId: true },
+  });
+  const srcFindingCount = srcFindings.length;
+  const movedFindings = srcFindingCount
+    ? (
+        await tx.findingTag.createMany({
+          data: srcFindings.map((r) => ({ findingId: r.findingId, tagId: target.id })),
+          skipDuplicates: true,
+        })
+      ).count
+    : 0;
 
   // Re-point activity correlation tags BEFORE deleting the source, so
   // `TargetActivity.tag`'s onDelete: SetNull never fires and the activity keeps a
@@ -259,6 +275,6 @@ export async function unapplyTag(
   tagId: number,
 ): Promise<{ evidenceCleared: number; findingsCleared: number }> {
   const ev = await tx.evidenceTag.deleteMany({ where: { tagId } });
-  // FINDING-TAGS: `const fi = await tx.findingTag.deleteMany({ where: { tagId } })`.
-  return { evidenceCleared: ev.count, findingsCleared: 0 };
+  const fi = await tx.findingTag.deleteMany({ where: { tagId } });
+  return { evidenceCleared: ev.count, findingsCleared: fi.count };
 }

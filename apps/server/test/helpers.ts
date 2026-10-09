@@ -12,6 +12,7 @@ const TABLES = [
   'engagement_targets',
   'evidence_findings',
   'evidence_tags',
+  'finding_tags',
   'evidence_metadata',
   'evidence',
   'findings',

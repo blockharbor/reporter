@@ -770,6 +770,14 @@ export const findingSchema = z.object({
   /** Recommended remediation / fix guidance (may be empty). */
   remediation: z.string(),
   category: z.string().nullable(),
+  /**
+   * The engagement tags on this finding — the same `Tag` pool evidence draws from
+   * (`FindingTag`), so a label means the same thing on both, in the engagement's
+   * curated tag order. Full tag objects rather than a count, on the list as well as
+   * the detail: the Findings page renders the chips on every card and filters on
+   * them client-side, over the already-fetched array.
+   */
+  tags: z.array(tagSchema),
   /** Qualitative severity (CVSS v3.1 scale); null when not yet rated. */
   severity: severitySchema.nullable(),
   /** Full CVSS v3.1 base vector string, when rated via the calculator. */
@@ -1183,6 +1191,13 @@ export const createFindingInput = z.object({
   fixEffort: fixEffortSchema.default('none'),
   iso21434Refs: z.array(z.string().max(120)).max(100).default([]),
   unr155Refs: z.array(z.string().max(120)).max(100).default([]),
+  /**
+   * Engagement tags to put on the new finding, by id. Ids that don't belong to
+   * this engagement are ignored rather than rejected, exactly as on evidence.
+   * Defaults to none — the create modal sends no tags; the field exists so an API
+   * or scripted caller can create an already-tagged finding in one call.
+   */
+  tagIds: z.array(z.number().int().positive()).default([]),
 });
 export type CreateFindingInput = z.infer<typeof createFindingInput>;
 
@@ -1206,6 +1221,13 @@ export const updateFindingInput = z.object({
   severity: severitySchema.nullable().optional(),
   cvssVector: cvssVectorSchema.nullable().optional(),
   readyToReport: z.boolean().optional(),
+  /**
+   * Replace the finding's tags with exactly these (set-replace, like
+   * `updateEvidenceInput.tagIds`): omitted leaves them alone, `[]` clears them.
+   * Ids are filtered to this engagement's own tags server-side, so a tag id from
+   * another engagement is dropped rather than linked.
+   */
+  tagIds: z.array(z.number().int().positive()).optional(),
 });
 export type UpdateFindingInput = z.infer<typeof updateFindingInput>;
 
@@ -1518,7 +1540,21 @@ export type FindingsImportResult = z.infer<typeof findingsImportResult>;
 // ---------------------------------------------------------------------------
 
 /** Bump when the engagement-export shape changes incompatibly; import gates on it. */
-export const ENGAGEMENT_EXPORT_VERSION = 1;
+export const ENGAGEMENT_EXPORT_VERSION = 2;
+
+/**
+ * The version an export is stamped with when nothing in it needs v2 semantics —
+ * i.e. when no finding carries a tag.
+ *
+ * v2 exists only to stop a backup containing finding tags from importing
+ * *quietly* into a pre-finding-tags server: that server validates
+ * `schemaVersion <= 1` and strips the `tagNames` field it has never heard of, so
+ * the import reports success while silently losing every finding's labels.
+ * Nothing else about the shape changed, so a backup whose findings are all
+ * untagged keeps the v1 stamp and keeps importing there. Same mechanism, and the
+ * same reasoning, as `FINDINGS_EXPORT_VERSION_WITHOUT_EXCLUSIONS`.
+ */
+export const ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS = 1;
 
 /** Marker in `manifest.json`, so a stray ZIP is rejected before anything is read. */
 export const ENGAGEMENT_EXPORT_FORMAT = 'reporter-engagement-export';
@@ -1716,8 +1752,10 @@ export type ExportedEvidenceLink = z.infer<typeof exportedEvidenceLinkSchema>;
 
 /**
  * A finding, with its evidence links. Its category travels by name (resolved
- * against `findingCategories`), and it keeps its uuid so the engagement's
- * `strategicRecommendations[].findingUuids` can be remapped on import.
+ * against `findingCategories`), its tags travel by name too (resolved against the
+ * file's own `tags` list, the same pool evidence references), and it keeps its
+ * uuid so the engagement's `strategicRecommendations[].findingUuids` can be
+ * remapped on import.
  */
 export const exportedEngagementFindingSchema = z.object({
   uuid: uuidSchema,
@@ -1739,6 +1777,12 @@ export const exportedEngagementFindingSchema = z.object({
   position: z.number().int().nonnegative(),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
+  /**
+   * The finding's tags (FindingTag), by tag name — the same engagement `Tag` pool
+   * evidence references, resolved against this file's own `tags` list on import.
+   * `.default([])` so a pre-finding-tags (v1) file still parses.
+   */
+  tagNames: z.array(z.string().max(64)).max(MAX_ENGAGEMENT_EXPORT_TAGS).default([]),
   evidenceLinks: z
     .array(exportedEvidenceLinkSchema)
     .max(MAX_IMPORT_EVIDENCE_PER_FINDING)
@@ -1955,7 +1999,7 @@ export const engagementImportDroppedSchema = z.object({
   unmatchedAuthorEmails: z.array(z.string()).default([]),
   /** Author columns left null because of the above. */
   unmatchedAuthorRefs: z.number().int().nonnegative(),
-  /** Tag names referenced by evidence or activities that the file never defines. */
+  /** Tag names referenced by evidence, findings or activities that the file never defines. */
   unknownTagRefs: z.number().int().nonnegative(),
   /** Evidence uuids referenced by something in the file that defines no such evidence. */
   danglingEvidenceRefs: z.number().int().nonnegative(),

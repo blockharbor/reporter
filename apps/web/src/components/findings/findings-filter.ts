@@ -53,6 +53,14 @@ export interface FindingsFilterState {
   categories: string[];
   /** Include findings with no category. */
   uncategorized: boolean;
+  /**
+   * Engagement tag NAMES; a finding matches if it carries any of them (OR within
+   * the facet, like the standards-ref facets). Names rather than ids so a shared
+   * URL still means something after a backup/restore — an import re-mints tag ids
+   * but preserves names — and so this addresses tags the same way the evidence
+   * query mini-language and the report timeline config do.
+   */
+  tags: string[];
   /** `true` = ready to report only, `false` = not-ready only. */
   readyToReport: boolean | undefined;
   fixEfforts: FixEffort[];
@@ -79,6 +87,7 @@ export const EMPTY_FILTER: FindingsFilterState = {
   kinds: [],
   categories: [],
   uncategorized: false,
+  tags: [],
   readyToReport: undefined,
   fixEfforts: [],
   hasEvidence: undefined,
@@ -99,6 +108,7 @@ export function isFilterActive(f: FindingsFilterState): boolean {
     f.kinds.length > 0 ||
     f.categories.length > 0 ||
     f.uncategorized ||
+    f.tags.length > 0 ||
     f.readyToReport !== undefined ||
     f.fixEfforts.length > 0 ||
     f.hasEvidence !== undefined ||
@@ -246,6 +256,7 @@ export function filterFindings(
   const severities = new Set<Severity>(filter.severities);
   const kinds = new Set<FindingKind>(filter.kinds);
   const categories = new Set(filter.categories);
+  const tagNames = new Set(filter.tags);
   const efforts = new Set<FixEffort>(filter.fixEfforts);
   const targets = new Set(filter.affectedTargets);
   const isoRefs = new Set(filter.iso21434Refs);
@@ -271,6 +282,9 @@ export function filterFindings(
       const ok = cat === null ? filter.uncategorized : categories.has(cat);
       if (!ok) return false;
     }
+
+    // OR within the facet: a finding matches if it carries any selected tag.
+    if (tagNames.size > 0 && !f.tags.some((t) => tagNames.has(t.name))) return false;
 
     if (filter.readyToReport !== undefined && f.readyToReport !== filter.readyToReport) {
       return false;
@@ -362,7 +376,9 @@ export function deriveFindingFacets(findings: readonly Finding[]): FindingFacets
  * The query params this page owns. Enum facets are comma-joined (their values are
  * controlled vocabularies, so a comma can never appear inside one); the two
  * free-text facets repeat their key instead (`?target=A&target=B`), because a
- * user-authored category or target may legitimately contain a comma.
+ * user-authored category or target may legitimately contain a comma. Tags join
+ * categories and targets as a repeated key for the same reason: a tag name is
+ * user-authored and may contain a comma (`?tag=CAN%20bus&tag=Telematics`).
  */
 const PARAM = {
   search: 'q',
@@ -370,6 +386,7 @@ const PARAM = {
   kind: 'kind',
   category: 'category',
   uncategorized: 'uncategorized',
+  tag: 'tag',
   ready: 'ready',
   effort: 'effort',
   evidence: 'evidence',
@@ -432,6 +449,7 @@ export function parseFindingsParams(params: URLSearchParams): {
       kinds: pickEnum(params.get(PARAM.kind), FINDING_KINDS),
       categories: params.getAll(PARAM.category).filter((c) => c.trim() !== ''),
       uncategorized: params.get(PARAM.uncategorized) === '1',
+      tags: params.getAll(PARAM.tag).filter((t) => t.trim() !== ''),
       readyToReport: parseYesNo(params.get(PARAM.ready)),
       fixEfforts: pickEnum(params.get(PARAM.effort), FIX_EFFORTS),
       hasEvidence: parseYesNo(params.get(PARAM.evidence)),
@@ -476,6 +494,7 @@ export function writeFindingsParams(
   setList(PARAM.kind, filter.kinds);
   for (const c of filter.categories) next.append(PARAM.category, c);
   if (filter.uncategorized) next.set(PARAM.uncategorized, '1');
+  for (const t of filter.tags) next.append(PARAM.tag, t);
   if (filter.readyToReport !== undefined) {
     next.set(PARAM.ready, filter.readyToReport ? 'yes' : 'no');
   }
