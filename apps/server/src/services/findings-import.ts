@@ -14,6 +14,16 @@
  * side effects outside the DB, and imports can be large). It is instead
  * idempotent: if it fails partway, re-running the same file converges — created
  * findings become no-op updates and the rest are created.
+ *
+ * AUDIT. An import of a hundred findings with their evidence is one event, not
+ * a few hundred: the whole run is wrapped `withIntent(ALL_AUDITED_MODELS, () =>
+ * withImporter('findings-import', …))`, so the backstop records none of the
+ * per-row writes and this module writes ONE `import` entry on the engagement
+ * carrying the six result counts. `createEvidence` is called without an audit
+ * context for the same reason — the importer deliberately speaks for every row
+ * it touches. A run that throws part-way records nothing (the scope's tripwire
+ * only fires on success), which is honest: the rows that did land are reached
+ * again by the idempotent re-run that will follow, and that run is recorded.
  */
 import type { FastifyInstance } from 'fastify';
 import {
@@ -21,13 +31,17 @@ import {
   type FindingsExport,
   type FindingsImportResult,
 } from '@reporter/shared';
+import { ALL_AUDITED_MODELS } from '../audit/models.js';
+import { withImporter } from '../audit/context.js';
 import { HttpError } from '../auth/guards.js';
 import { REPORT_VISIBLE_EVIDENCE } from '../helpers/report-visibility.js';
+import { n, q, recordAudit, withIntent, type AuditCtx } from './audit.js';
 import { createEvidence } from './evidence.js';
 
 interface EngagementRef {
   id: number;
   slug: string;
+  name: string;
 }
 
 /** Cap on the total number of evidence items a single import may materialize. */
@@ -54,15 +68,51 @@ export async function importFindings(
   eng: EngagementRef,
   data: FindingsExport,
   operatorId: number,
+  audit: AuditCtx,
 ): Promise<FindingsImportResult> {
   // Bound total work up front (before any writes) so a crafted file can't
   // materialize an unbounded number of rows/blobs. Per-array caps are enforced
   // by the schema (MAX_IMPORT_FINDINGS / MAX_IMPORT_EVIDENCE_PER_FINDING).
-  const totalEvidence = data.findings.reduce((n, f) => n + f.evidence.length, 0);
+  const totalEvidence = data.findings.reduce((sum, f) => sum + f.evidence.length, 0);
   if (data.findings.length > MAX_IMPORT_FINDINGS || totalEvidence > MAX_IMPORT_TOTAL_EVIDENCE) {
     throw new HttpError(413, 'Import is too large');
   }
 
+  return withIntent(ALL_AUDITED_MODELS, () =>
+    withImporter('findings-import', async () => {
+      const result = await runImport(app, eng, data, operatorId);
+      await recordAudit(audit, {
+        action: 'import',
+        entityType: 'engagement',
+        entity: { id: String(eng.id), label: eng.name },
+        summary:
+          `Imported findings from ${q(data.engagement.slug)}: ` +
+          `${n(result.findingsCreated, 'finding')} created, ${result.findingsUpdated} updated, ` +
+          `${result.findingsSkipped} skipped; ` +
+          `${n(result.evidenceCreated, 'evidence', 'evidence')} added, ` +
+          `${result.evidenceLinked} linked, ${result.evidenceSkipped} skipped`,
+        changes: [
+          { kind: 'count', label: 'Findings created', count: result.findingsCreated },
+          { kind: 'count', label: 'Findings updated', count: result.findingsUpdated },
+          { kind: 'count', label: 'Findings skipped', count: result.findingsSkipped },
+          { kind: 'count', label: 'Evidence added', count: result.evidenceCreated },
+          { kind: 'count', label: 'Evidence linked', count: result.evidenceLinked },
+          { kind: 'count', label: 'Evidence skipped', count: result.evidenceSkipped },
+        ],
+        engagement: eng,
+      });
+      return result;
+    }),
+  );
+}
+
+/** The import itself: every row write in here is silenced by the importer scope above. */
+async function runImport(
+  app: FastifyInstance,
+  eng: EngagementRef,
+  data: FindingsExport,
+  operatorId: number,
+): Promise<FindingsImportResult> {
   const result: FindingsImportResult = {
     findingsCreated: 0,
     findingsUpdated: 0,

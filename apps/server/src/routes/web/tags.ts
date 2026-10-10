@@ -1,6 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import type { Prisma } from '@prisma/client';
-import { createTagInput, mergeTagInput, reorderIdsInput, updateTagInput } from '@reporter/shared';
+import {
+  createTagInput,
+  mergeTagInput,
+  reorderIdsInput,
+  updateTagInput,
+  type AuditChange,
+} from '@reporter/shared';
 import { HttpError, requireAuth, requireEngagementRole } from '../../auth/guards.js';
 import { serializeTag } from '../../services/serializers.js';
 import {
@@ -13,6 +19,7 @@ import {
   tagReferencesFor,
   unapplyTag,
 } from '../../services/tags.js';
+import { auditCtx, inTx, n, orderLabel, q, recordAudit, withIntent } from '../../services/audit.js';
 
 /**
  * Tag management for the web UI. Roles: `read` for the two GETs, `write` for
@@ -23,6 +30,16 @@ import {
  * orders by the curated `position` rather than by name, and why it carries the
  * split usage counts and the activity hint that the delete / merge / unapply
  * confirmations quote.
+ *
+ * AUDIT. Create is left to the backstop: one plain write whose row-level truth
+ * ("Created tag “recon”") is the right sentence. Every other mutation runs in a
+ * transaction — the backstop cannot see into one — and each describes itself:
+ * a reorder is ONE entry with the names before and after, a rename and recolor
+ * is one discrete entry (dialog-driven, so it never folds), and delete, merge
+ * and unapply are one entry each carrying the counts of what they touched,
+ * including the by-name timeline rewrite that otherwise surfaces as an
+ * engagement edit. Each `withIntent` names exactly the models its transaction
+ * writes, and the entry is written through `tx` so it commits with the work.
  */
 export async function tagRoutes(app: FastifyInstance): Promise<void> {
   const engBySlug = (slug: string) => app.db.engagement.findUniqueOrThrow({ where: { slug } });
@@ -133,22 +150,47 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
       const { slug } = req.params as { slug: string };
       const { orderedIds } = reorderIdsInput.parse(req.body);
       const eng = await engBySlug(slug);
+      // Read in the list's own order, which is the `from` side of the entry.
       const tags = await app.db.tag.findMany({
         where: { engagementId: eng.id },
-        select: { id: true },
+        select: { id: true, name: true },
+        orderBy: TAG_ORDER_BY,
       });
-      const ids = new Set(tags.map((t) => t.id));
+      const byId = new Map(tags.map((t) => [t.id, t]));
       if (
-        ids.size !== orderedIds.length ||
+        byId.size !== orderedIds.length ||
         new Set(orderedIds).size !== orderedIds.length ||
-        orderedIds.some((tid) => !ids.has(tid))
+        orderedIds.some((tid) => !byId.has(tid))
       ) {
         throw new HttpError(400, 'Order must list exactly the tags in this engagement, once each');
       }
-      await app.db.$transaction(
-        orderedIds.map((tid, i) =>
-          app.db.tag.update({ where: { id: tid }, data: { position: i } }),
-        ),
+      // The same order again (a drag dropped back where it started) moves
+      // nothing: no write, no entry.
+      if (tags.every((t, i) => t.id === orderedIds[i])) return { ok: true };
+
+      // ONE entry for the reorder, with the names before and after, written
+      // through the transaction so it commits with the positions.
+      const ctx = auditCtx(req, { id: eng.id, slug, name: eng.name });
+      await withIntent(['tag'], () =>
+        app.db.$transaction(async (tx) => {
+          for (let i = 0; i < orderedIds.length; i++) {
+            await tx.tag.update({ where: { id: orderedIds[i]! }, data: { position: i } });
+          }
+          await recordAudit(inTx(ctx, tx), {
+            action: 'reorder',
+            entityType: 'engagement',
+            entity: { id: String(eng.id), label: eng.name },
+            summary: `Reordered ${n(orderedIds.length, 'tag')}`,
+            changes: [
+              {
+                kind: 'order',
+                field: 'tags',
+                from: tags.map((t) => orderLabel(t.name)),
+                to: orderedIds.map((id) => orderLabel(byId.get(id)!.name)),
+              },
+            ],
+          });
+        }),
       );
       return { ok: true };
     },
@@ -162,30 +204,74 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
       const input = updateTagInput.parse(req.body);
       const eng = await engBySlug(slug);
       const tagId = intParam(id, 'tag');
-      const updated = await app.db.$transaction(async (tx) => {
-        const tag = await getTag(tx, eng.id, tagId);
-        const renamedTo = input.name !== undefined && input.name !== tag.name ? input.name : null;
-        if (renamedTo) {
-          // Pre-check the @@unique([engagementId, name]) constraint. Without it a
-          // rename collision reached app.ts's catch-all as a 500 — and the rename
-          // UI would hit that on day one. `rethrowDuplicateTagName` below covers
-          // the race between this read and the write.
-          const clash = await tx.tag.findUnique({
-            where: { engagementId_name: { engagementId: eng.id, name: renamedTo } },
+      const ctx = auditCtx(req, { id: eng.id, slug, name: eng.name });
+      // `engagement` is claimed as well as `tag`: a rename rewrites the report's
+      // timeline config, which would otherwise surface as an engagement edit.
+      const updated = await withIntent(['tag', 'engagement'], () =>
+        app.db.$transaction(async (tx) => {
+          const tag = await getTag(tx, eng.id, tagId);
+          const renamedTo = input.name !== undefined && input.name !== tag.name ? input.name : null;
+          const recolorTo =
+            input.colorName !== undefined && input.colorName !== tag.colorName
+              ? input.colorName
+              : null;
+          if (renamedTo) {
+            // Pre-check the @@unique([engagementId, name]) constraint. Without it a
+            // rename collision reached app.ts's catch-all as a 500 — and the rename
+            // UI would hit that on day one. `rethrowDuplicateTagName` below covers
+            // the race between this read and the write.
+            const clash = await tx.tag.findUnique({
+              where: { engagementId_name: { engagementId: eng.id, name: renamedTo } },
+            });
+            if (clash) throw new HttpError(409, DUPLICATE_TAG_NAME);
+          }
+          // A save that changes nothing — the dialog's Save with nothing edited,
+          // the tag's own name again — writes nothing and records nothing. The
+          // row has no timestamp to bump, so skipping the update is invisible,
+          // and a scope that wrote its model and recorded nothing would trip.
+          if (!renamedTo && !recolorTo) return tag;
+
+          // `{ ...input }` rather than `input`: `updateTagInput` is a ZodEffects, and
+          // zod has already stripped anything but `name` / `colorName`.
+          const u = await tx.tag
+            .update({ where: { id: tag.id }, data: { ...input } })
+            .catch(rethrowDuplicateTagName);
+          // The report's Assessment Execution timeline config names tags by string,
+          // so a rename that didn't follow it would silently empty that section.
+          // Saved queries are deliberately NOT rewritten — see services/tags.ts.
+          const rewritten = renamedTo
+            ? await rewriteTimelineTagNames(tx, eng.id, tag.name, renamedTo)
+            : 0;
+
+          // One discrete entry for the save, through `recordAudit` and never the
+          // fold: a rename comes from a dialog, and "a → b" then "b → c" must
+          // stay two lines.
+          const changes: AuditChange[] = [];
+          if (renamedTo)
+            changes.push({ kind: 'field', field: 'name', from: tag.name, to: renamedTo });
+          if (recolorTo) {
+            changes.push({ kind: 'field', field: 'colorName', from: tag.colorName, to: recolorTo });
+          }
+          if (rewritten > 0) {
+            changes.push({ kind: 'count', label: 'Timeline sections rewritten', count: rewritten });
+          }
+          const what =
+            renamedTo && recolorTo
+              ? `Renamed tag ${q(tag.name)} to ${q(renamedTo)} and changed its color from ${tag.colorName} to ${recolorTo}`
+              : renamedTo
+                ? `Renamed tag ${q(tag.name)} to ${q(renamedTo)}`
+                : `Changed the color of tag ${q(tag.name)} from ${tag.colorName} to ${recolorTo}`;
+          await recordAudit(inTx(ctx, tx), {
+            action: 'update',
+            entityType: 'tag',
+            entity: { id: String(tag.id), label: tag.name },
+            summary:
+              rewritten > 0 ? `${what}; ${n(rewritten, 'timeline section')} rewritten` : what,
+            changes,
           });
-          if (clash) throw new HttpError(409, DUPLICATE_TAG_NAME);
-        }
-        // `{ ...input }` rather than `input`: `updateTagInput` is a ZodEffects, and
-        // zod has already stripped anything but `name` / `colorName`.
-        const u = await tx.tag
-          .update({ where: { id: tag.id }, data: { ...input } })
-          .catch(rethrowDuplicateTagName);
-        // The report's Assessment Execution timeline config names tags by string,
-        // so a rename that didn't follow it would silently empty that section.
-        // Saved queries are deliberately NOT rewritten — see services/tags.ts.
-        if (renamedTo) await rewriteTimelineTagNames(tx, eng.id, tag.name, renamedTo);
-        return u;
-      });
+          return u;
+        }),
+      );
       return serializeTag(updated);
     },
   );
@@ -203,11 +289,45 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
       const { slug, id } = req.params as { slug: string; id: string };
       const eng = await engBySlug(slug);
       const tagId = intParam(id, 'tag');
-      await app.db.$transaction(async (tx) => {
-        const tag = await getTag(tx, eng.id, tagId);
-        await rewriteTimelineTagNames(tx, eng.id, tag.name, null);
-        await tx.tag.delete({ where: { id: tag.id } });
-      });
+      const ctx = auditCtx(req, { id: eng.id, slug, name: eng.name });
+      // The cascades (chips) and the SetNull (activity correlations) are the
+      // database's and invisible to the backstop, so they are counted inside the
+      // transaction, before the row goes, and the entry is written before the
+      // delete: a failed insert fails the delete, never the other way round.
+      await withIntent(['tag', 'engagement'], () =>
+        app.db.$transaction(async (tx) => {
+          const tag = await getTag(tx, eng.id, tagId);
+          const onEvidence = await tx.evidenceTag.count({ where: { tagId: tag.id } });
+          const onFindings = await tx.findingTag.count({ where: { tagId: tag.id } });
+          const onActivities = await tx.targetActivity.count({ where: { tagId: tag.id } });
+          const rewritten = await rewriteTimelineTagNames(tx, eng.id, tag.name, null);
+          const changes: AuditChange[] = [
+            { kind: 'field', field: 'name', from: tag.name, to: null },
+            { kind: 'field', field: 'colorName', from: tag.colorName, to: null },
+            { kind: 'count', label: 'Evidence', count: onEvidence },
+            { kind: 'count', label: 'Findings', count: onFindings },
+          ];
+          if (onActivities > 0) {
+            changes.push({ kind: 'count', label: 'Activities uncorrelated', count: onActivities });
+          }
+          if (rewritten > 0) {
+            changes.push({ kind: 'count', label: 'Timeline sections rewritten', count: rewritten });
+          }
+          await recordAudit(inTx(ctx, tx), {
+            action: 'delete',
+            entityType: 'tag',
+            entity: { id: String(tag.id), label: tag.name },
+            summary:
+              `Deleted tag ${q(tag.name)} (on ${n(onEvidence, 'evidence', 'evidence')} and ${n(onFindings, 'finding')})` +
+              (onActivities > 0
+                ? `; ${n(onActivities, 'activity', 'activities')} lost its correlation`
+                : '') +
+              (rewritten > 0 ? `; ${n(rewritten, 'timeline section')} rewritten` : ''),
+            changes,
+          });
+          await tx.tag.delete({ where: { id: tag.id } });
+        }),
+      );
       return { ok: true };
     },
   );
@@ -238,14 +358,63 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
       const sourceId = intParam(id, 'tag');
       if (sourceId === intoTagId) throw new HttpError(400, 'A tag cannot be merged into itself');
 
-      const moved = await app.db.$transaction(async (tx) => {
-        // Both rows are read inside the transaction, so the names written into
-        // the timeline config are the names as of this merge, not as of a read
-        // that a concurrent rename could have overtaken.
-        const source = await getTag(tx, eng.id, sourceId);
-        const target = await getTag(tx, eng.id, intoTagId);
-        return mergeTagInto(tx, eng.id, source, target);
-      });
+      // ONE entry on the surviving tag for the whole merge, never one per
+      // copied chip: the scope names every model `mergeTagInto` writes (the two
+      // join tables, the activity re-point, the timeline rewrite on the
+      // engagement, and the source row's delete).
+      const ctx = auditCtx(req, { id: eng.id, slug, name: eng.name });
+      const moved = await withIntent(
+        ['tag', 'evidenceTag', 'findingTag', 'targetActivity', 'engagement'],
+        () =>
+          app.db.$transaction(async (tx) => {
+            // Both rows are read inside the transaction, so the names written into
+            // the timeline config are the names as of this merge, not as of a read
+            // that a concurrent rename could have overtaken.
+            const source = await getTag(tx, eng.id, sourceId);
+            const target = await getTag(tx, eng.id, intoTagId);
+            const outcome = await mergeTagInto(tx, eng.id, source, target);
+            await recordAudit(inTx(ctx, tx), {
+              action: 'merge',
+              entityType: 'tag',
+              entity: { id: String(target.id), label: target.name },
+              summary:
+                `Merged tag ${q(source.name)} into ${q(target.name)}: ` +
+                `${n(outcome.movedEvidence, 'evidence', 'evidence')} and ${n(outcome.movedFindings, 'finding')} relinked` +
+                (outcome.repointedActivities > 0
+                  ? `, ${n(outcome.repointedActivities, 'activity', 'activities')} re-pointed`
+                  : '') +
+                (outcome.rewrittenTimelineSections > 0
+                  ? `, ${n(outcome.rewrittenTimelineSections, 'timeline section')} rewritten`
+                  : ''),
+              changes: [
+                { kind: 'items', label: 'Merged from', items: [source.name] },
+                { kind: 'count', label: 'Evidence moved', count: outcome.movedEvidence },
+                {
+                  kind: 'count',
+                  label: 'Evidence already tagged',
+                  count: outcome.evidenceAlreadyTagged,
+                },
+                { kind: 'count', label: 'Findings moved', count: outcome.movedFindings },
+                {
+                  kind: 'count',
+                  label: 'Findings already tagged',
+                  count: outcome.findingsAlreadyTagged,
+                },
+                {
+                  kind: 'count',
+                  label: 'Activities re-pointed',
+                  count: outcome.repointedActivities,
+                },
+                {
+                  kind: 'count',
+                  label: 'Timeline sections rewritten',
+                  count: outcome.rewrittenTimelineSections,
+                },
+              ],
+            });
+            return outcome;
+          }),
+      );
 
       const fresh = await app.db.tag.findUniqueOrThrow({
         where: { id: intoTagId },
@@ -264,10 +433,27 @@ export async function tagRoutes(app: FastifyInstance): Promise<void> {
       const { slug, id } = req.params as { slug: string; id: string };
       const eng = await engBySlug(slug);
       const tagId = intParam(id, 'tag');
-      return app.db.$transaction(async (tx) => {
-        const tag = await getTag(tx, eng.id, tagId);
-        return unapplyTag(tx, tag.id);
-      });
+      // ONE entry with the two counts. Recorded even when both are zero: the
+      // two `deleteMany`s still ran, and an explicit unapply of an unused tag
+      // is a deliberate action, not an autosave no-op.
+      const ctx = auditCtx(req, { id: eng.id, slug, name: eng.name });
+      return withIntent(['evidenceTag', 'findingTag'], () =>
+        app.db.$transaction(async (tx) => {
+          const tag = await getTag(tx, eng.id, tagId);
+          const result = await unapplyTag(tx, tag.id);
+          await recordAudit(inTx(ctx, tx), {
+            action: 'unapply',
+            entityType: 'tag',
+            entity: { id: String(tag.id), label: tag.name },
+            summary: `Removed tag ${q(tag.name)} from ${n(result.evidenceCleared, 'evidence', 'evidence')} and ${n(result.findingsCleared, 'finding')}`,
+            changes: [
+              { kind: 'count', label: 'Evidence', count: result.evidenceCleared },
+              { kind: 'count', label: 'Findings', count: result.findingsCleared },
+            ],
+          });
+          return result;
+        }),
+      );
     },
   );
 }

@@ -10,6 +10,16 @@ import {
 } from '@reporter/shared';
 import { HttpError, requireAdmin, requireAuth } from '../../auth/guards.js';
 import {
+  AUDIT_TX_MAX_WAIT_MS,
+  AUDIT_TX_TIMEOUT_MS,
+  auditCtx,
+  inTx,
+  n,
+  q,
+  recordAudit,
+  withIntent,
+} from '../../services/audit.js';
+import {
   assertSiteKeepsAnAdmin,
   countUserDeletionImpact,
   createLocalUser,
@@ -18,6 +28,25 @@ import {
 import { serializeApiKey, serializeEngagement, serializeUser } from '../../services/serializers.js';
 
 const adminGuard = [requireAuth, requireAdmin];
+
+/** The user's handle in a summary: the same label the backstop gives a `user` row. */
+function displayName(u: { firstName: string; lastName: string; email: string }): string {
+  return `${u.firstName} ${u.lastName}`.trim() || u.email;
+}
+
+// AUDIT. Everything in this file is site administration, so every entry here
+// has no engagement (`auditCtx(req)`) and lands in the admin log only. The
+// backstop already records what the row-level truth describes well — a user
+// created (with its nested identity as a count only), a default tag added or
+// removed, and the profile-style edits — so those handlers add nothing. Hand-
+// written entries cover the rest: the admin toggles, where a fold would turn
+// "disabled then re-enabled" into one entry whose before and after agree; the
+// user delete, which runs in a transaction the backstop cannot see and whose
+// cascades it could not count anyway; and the credential flows (recovery link,
+// TOTP reset, API-key revoke), whose models are deliberately unaudited so no
+// generic diff can ever carry a hash. The only identity an API-key entry has is
+// `String(apiKey.id)`: `entityId` survives a removal, so the access key — public
+// as it is — is not written anywhere in the table.
 
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // --- Users ---
@@ -80,7 +109,55 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       admin: body.admin ?? user.admin,
       disabled: body.disabled ?? user.disabled,
     });
-    const updated = await app.db.user.update({ where: { id: user.id }, data: body });
+
+    // One discrete entry per flag that actually flips, through `recordAudit` and
+    // never the fold: an admin who disables a user and re-enables them a minute
+    // later must leave two lines, not one whose before and after both read
+    // `false`. A no-op PUT (the same values again) stays outside the scope — the
+    // backstop sees an update with no diff and writes nothing, and a scope with
+    // a listed write and no entry would trip.
+    const name = displayName(user);
+    const flips: Array<{
+      field: 'admin' | 'disabled';
+      from: boolean;
+      to: boolean;
+      summary: string;
+    }> = [];
+    if (body.admin !== undefined && body.admin !== user.admin) {
+      flips.push({
+        field: 'admin',
+        from: user.admin,
+        to: body.admin,
+        summary: body.admin
+          ? `Granted site admin to ${q(name)}`
+          : `Revoked site admin from ${q(name)}`,
+      });
+    }
+    if (body.disabled !== undefined && body.disabled !== user.disabled) {
+      flips.push({
+        field: 'disabled',
+        from: user.disabled,
+        to: body.disabled,
+        summary: body.disabled ? `Disabled user ${q(name)}` : `Enabled user ${q(name)}`,
+      });
+    }
+    const update = () => app.db.user.update({ where: { id: user.id }, data: body });
+    if (flips.length === 0) return serializeUser(await update());
+
+    const ctx = auditCtx(req);
+    const updated = await withIntent(['user'], async () => {
+      const row = await update();
+      for (const flip of flips) {
+        await recordAudit(ctx, {
+          action: 'update',
+          entityType: 'user',
+          entity: { id: user.slug, label: name },
+          summary: flip.summary,
+          changes: [{ kind: 'field', field: flip.field, from: flip.from, to: flip.to }],
+        });
+      }
+      return row;
+    });
     return serializeUser(updated);
   });
 
@@ -121,11 +198,49 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 
     // Count inside the transaction, before the row goes, so the numbers handed back
     // describe exactly the rows this delete anonymized and revoked.
-    const impact = await app.db.$transaction(async (tx) => {
-      const counts = await countUserDeletionImpact(tx, user.id);
-      await tx.user.delete({ where: { id: user.id } });
-      return counts;
-    });
+    //
+    // The audit entry is written INSIDE the transaction, through `tx`, and
+    // BEFORE the delete: the two commit or roll back together, so an unlogged
+    // user deletion is impossible, and the entry exists when the schema's
+    // `SET NULL` on audit_entries.actor_id runs — it is the admin's entry, so
+    // nothing on it is nulled, while the deleted user's own earlier entries keep
+    // their name and email snapshots. `withIntent` names the models the delete
+    // speaks for: `user` is the one Prisma write; the rest are the cascades and
+    // anonymizations the database performs (invisible to the backstop) that the
+    // counts describe. The explicit limits matter: every audit row naming this
+    // user fires the guard trigger on its way to NULL, and Prisma's 5 s default
+    // was sized for a handful of statements, not a long-lived engagement's log.
+    const name = displayName(user);
+    const ctx = auditCtx(req);
+    const impact = await withIntent(
+      ['user', 'userEngagementRole', 'evidence', 'evidenceComment', 'apiKey'],
+      () =>
+        app.db.$transaction(
+          async (tx) => {
+            const counts = await countUserDeletionImpact(tx, user.id);
+            await recordAudit(inTx(ctx, tx), {
+              action: 'delete',
+              entityType: 'user',
+              entity: { id: user.slug, label: name },
+              summary:
+                `Deleted user ${q(name)} (${user.email}): ` +
+                `${n(counts.evidence, 'evidence', 'evidence')} and ${n(counts.comments, 'comment')} anonymized, ` +
+                `${n(counts.engagements, 'membership')} and ${n(counts.apiKeys, 'API key')} revoked`,
+              changes: [
+                { kind: 'field', field: 'email', from: user.email, to: null },
+                { kind: 'field', field: 'admin', from: user.admin, to: null },
+                { kind: 'count', label: 'Evidence anonymized', count: counts.evidence },
+                { kind: 'count', label: 'Comments anonymized', count: counts.comments },
+                { kind: 'count', label: 'Memberships revoked', count: counts.engagements },
+                { kind: 'count', label: 'API keys revoked', count: counts.apiKeys },
+              ],
+            });
+            await tx.user.delete({ where: { id: user.id } });
+            return counts;
+          },
+          { maxWait: AUDIT_TX_MAX_WAIT_MS, timeout: AUDIT_TX_TIMEOUT_MS },
+        ),
+    );
     return { ok: true as const, slug: user.slug, ...impact };
   });
 
@@ -136,8 +251,16 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     if (!user) throw new HttpError(404, 'User not found');
     const code = randomBytes(24).toString('base64url');
     const codeHash = createHash('sha256').update(code).digest('hex');
-    await app.db.recoveryCode.create({
-      data: { userId: user.id, codeHash, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) },
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await app.db.recoveryCode.create({ data: { userId: user.id, codeHash, expiresAt } });
+    // The fact and the expiry are the record; the code and its hash never reach
+    // the log (RecoveryCode is unaudited, and this entry carries neither).
+    await recordAudit(auditCtx(req), {
+      action: 'recovery_link_issued',
+      entityType: 'user',
+      entity: { id: user.slug, label: displayName(user) },
+      summary: `Issued a recovery link for ${q(displayName(user))}`,
+      changes: [{ kind: 'field', field: 'expiresAt', from: null, to: expiresAt.toISOString() }],
     });
     // The code is returned once; the admin shares the /login/recovery/<code> link.
     return { recoveryUrl: `${app.config.APP_URL}/login/recovery/${code}` };
@@ -152,6 +275,13 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const { count } = await app.db.authIdentity.updateMany({
       where: { userId: user.id, totpSecret: { not: null } },
       data: { totpSecret: null },
+    });
+    await recordAudit(auditCtx(req), {
+      action: 'totp_reset',
+      entityType: 'user',
+      entity: { id: user.slug, label: displayName(user) },
+      summary: `Reset TOTP for ${q(displayName(user))}${count === 0 ? ' (nothing was enrolled)' : ''}`,
+      changes: [{ kind: 'count', label: 'Identities cleared', count }],
     });
     return { ok: true, hadTotp: count > 0 };
   });
@@ -175,6 +305,15 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const key = await app.db.apiKey.findUnique({ where: { accessKey } });
     if (!key || key.userId !== user.id) throw new HttpError(404, 'API key not found');
     await app.db.apiKey.delete({ where: { id: key.id } });
+    // Identified by the row id only. The key's creation time is the one
+    // non-secret detail that tells two of a user's keys apart in the UI.
+    await recordAudit(auditCtx(req), {
+      action: 'delete',
+      entityType: 'api_key',
+      entity: { id: String(key.id), label: `API key of ${displayName(user)}` },
+      summary: `Revoked an API key of ${q(displayName(user))}`,
+      changes: [{ kind: 'field', field: 'createdAt', from: key.createdAt.toISOString(), to: null }],
+    });
     return { ok: true };
   });
 

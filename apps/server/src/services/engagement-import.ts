@@ -79,6 +79,30 @@
  * an account for an email freed by the hard delete and claim it through an admin
  * recovery link. Engagement membership is not in the file at all (see the export's
  * inventory) — the importing user becomes the new engagement's owner.
+ *
+ * ---------------------------------------------------------------------------
+ * The audit log is restored as content, and marked as such.
+ * ---------------------------------------------------------------------------
+ * A v3 archive carries the engagement's audit log. Every restored entry keeps its
+ * summary, changes, actor snapshot and timestamps — the record of what happened
+ * to the source engagement — but is stamped `source: 'import'`, re-attached to
+ * the NEW engagement, given a fresh uuid, and never coalesces (`coalesceKey`
+ * null), so the log reads as history that arrived in a file rather than as
+ * things that happened here. `entityId` is remapped where the file lets it be
+ * (evidence, findings, comments, reports and the engagement itself have new
+ * ids); anything else is nulled rather than left pointing at a row on another
+ * server. The actor's local account is resolved by email, quietly: a miss is
+ * not an authorship loss (the snapshot is the attribution) and is not counted
+ * as one.
+ *
+ * Two things do NOT travel. A removed (tombstoned) entry stays on the server
+ * that removed it, and an entry that arrives carrying removal fields is refused
+ * outright, because a file can be edited and a removal record is this server's
+ * decision to make. And the import's own transaction writes exactly ONE entry
+ * of its own — the summary, attributed to the importing admin, naming the
+ * source — rather than one per restored row: the backstop is suppressed for the
+ * whole transaction (`withIntent` over every model) because the file IS the
+ * record, and re-describing fifty thousand rows as "created" would bury it.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
@@ -89,6 +113,7 @@ import {
   ENGAGEMENT_EXPORT_DATA_ENTRY,
   ENGAGEMENT_EXPORT_MANIFEST_ENTRY,
   ENGAGEMENT_EXPORT_VERSION,
+  MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES,
   engagementExportManifestSchema,
   engagementExportSchema,
   engagementImportResultSchema,
@@ -99,7 +124,10 @@ import {
   type ExecutionSubsection,
   type RecommendationItem,
 } from '@reporter/shared';
+import { withImporter } from '../audit/context.js';
+import { ALL_AUDITED_MODELS } from '../audit/models.js';
 import { HttpError } from '../auth/guards.js';
+import { inTx, q, recordAudit, withIntent, type AuditCtx } from './audit.js';
 import { decodeScriptUpload } from './evidence.js';
 import { uniqueSlug } from '../helpers/slug.js';
 import { openZip, type ZipReader } from '../helpers/zip-read.js';
@@ -153,6 +181,11 @@ export interface EngagementImportArgs extends EngagementImportInput {
   archive: Buffer;
   /** The user performing the import; becomes the new engagement's owner. */
   userId: number;
+  /**
+   * The request's audit context. The one summary entry is written inside the
+   * import's transaction through it, re-pointed at the new engagement.
+   */
+  audit: AuditCtx;
 }
 
 /**
@@ -264,14 +297,23 @@ async function importFromArchive(
   // what it predates.
   assertSupportedVersion(manifest.schemaVersion);
 
+  const rawData = await readJsonEntry(zip, ENGAGEMENT_EXPORT_DATA_ENTRY);
+  // Checked on the RAW value: zod strips keys it does not know, so by the time the
+  // records are parsed a forged removal would have vanished into a live entry.
+  assertNoRemovalRecords(rawData);
   const data: EngagementExport = parseEntry(
     engagementExportSchema,
-    await readJsonEntry(zip, ENGAGEMENT_EXPORT_DATA_ENTRY),
+    rawData,
     ENGAGEMENT_EXPORT_DATA_ENTRY,
   );
   // The manifest is metadata; `engagement.json` is the thing being imported, so its
   // own version is gated too rather than trusted to agree.
   assertSupportedVersion(data.schemaVersion);
+  // The same bound the exporter applies, for a file assembled some other way: the
+  // newest entries win, matching what an oversized export would have kept.
+  if (data.auditEntries.length > MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES) {
+    data.auditEntries = data.auditEntries.slice(-MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES);
+  }
 
   assertUniqueUuids(
     data.evidence.map((e) => e.uuid),
@@ -288,6 +330,10 @@ async function importFromArchive(
   assertUniqueUuids(
     data.generatedReports.map((r) => r.uuid),
     'generated report',
+  );
+  assertUniqueUuids(
+    data.auditEntries.map((a) => a.uuid),
+    'audit entry',
   );
 
   // --- 2. Plan the blobs: which entry restores into which column, and whether the
@@ -505,26 +551,36 @@ async function importFromArchive(
       }
     }
 
-    // --- 6. Every row, in one transaction. ------------------------------------
-    created = await app.db.$transaction(
-      async (tx) => {
-        return insertEngagement(tx, {
-          app,
-          args,
-          data,
-          strategicRecommendations,
-          executionNarrative,
-          newEvidenceUuids,
-          newFindingUuids,
-          evidenceUuidMap,
-          findingUuidMap,
-          evidenceBlobs,
-          reportBlobs,
-          authorId,
-          dropped,
-        });
-      },
-      { maxWait: IMPORT_TRANSACTION_MAX_WAIT_MS, timeout: IMPORT_TRANSACTION_TIMEOUT_MS },
+    // --- 6. Every row, in one transaction. The backstop is suppressed for every
+    // model for the whole of it (`withIntent` over the full list, the maintenance
+    // rule for a transaction that writes many models) and the importer tag marks
+    // the scope, so the only entry the transaction writes is the summary at the
+    // end of `insertEngagement` — which also satisfies `withIntent`'s tripwire. -
+    created = await withIntent(ALL_AUDITED_MODELS, () =>
+      withImporter('engagement-import', () =>
+        app.db.$transaction(
+          async (tx) => {
+            return insertEngagement(tx, {
+              app,
+              args,
+              data,
+              manifest,
+              strategicRecommendations,
+              executionNarrative,
+              newEvidenceUuids,
+              newFindingUuids,
+              evidenceUuidMap,
+              findingUuidMap,
+              evidenceBlobs,
+              reportBlobs,
+              authorId,
+              userIdByEmail,
+              dropped,
+            });
+          },
+          { maxWait: IMPORT_TRANSACTION_MAX_WAIT_MS, timeout: IMPORT_TRANSACTION_TIMEOUT_MS },
+        ),
+      ),
     );
   } catch (err) {
     // Compensating delete: the transaction rolled back, so nothing references
@@ -570,10 +626,36 @@ function assertSupportedVersion(version: number): void {
   }
 }
 
+/**
+ * Refuse a file whose audit entries carry removal fields. The exporter never
+ * writes them (a tombstoned entry does not travel at all), so their presence
+ * means a hand-edited file trying to arrive pre-removed — and a removal is a
+ * decision this server's site admin makes, on the record, never one a file can
+ * import. Any key that starts with `deleted` is enough: the row's own columns
+ * are `deletedAt` / `deletedBy*` / `deletedReason`, and a bare `deleted` flag
+ * is the obvious forgery.
+ */
+function assertNoRemovalRecords(raw: unknown): void {
+  if (typeof raw !== 'object' || raw === null) return;
+  const entries = (raw as { auditEntries?: unknown }).auditEntries;
+  if (!Array.isArray(entries)) return;
+  for (const [index, entry] of entries.entries()) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const key = Object.keys(entry).find((k) => k.toLowerCase().startsWith('deleted'));
+    if (key !== undefined) {
+      throw new HttpError(
+        400,
+        `Audit entry ${index} in the archive carries a removal field (${key}); removed entries do not travel, and an import cannot remove one`,
+      );
+    }
+  }
+}
+
 interface InsertArgs {
   app: FastifyInstance;
   args: EngagementImportArgs;
   data: EngagementExport;
+  manifest: { counts: { auditEntriesTotal: number } };
   strategicRecommendations: RecommendationItem[];
   executionNarrative: ExecutionSubsection[];
   newEvidenceUuids: string[];
@@ -583,6 +665,12 @@ interface InsertArgs {
   evidenceBlobs: { full: RestoredBlob | null; thumb: RestoredBlob | null }[];
   reportBlobs: (RestoredBlob | null)[];
   authorId: (email: string | null) => number | null;
+  /**
+   * The quiet sibling of `authorId`, for audit actors: a miss leaves the FK
+   * null and is NOT counted, because the entry's own name/email snapshot is the
+   * attribution and nothing is lost.
+   */
+  userIdByEmail: Map<string, number>;
   dropped: {
     unknownTagRefs: number;
     danglingEvidenceRefs: number;
@@ -625,6 +713,9 @@ const asJson = (value: unknown): Prisma.InputJsonValue => value as Prisma.InputJ
  *      findings, which use `createMany` plus one read-back).
  *  10. GoalEvidence / GoalFinding — need goals (9) *and* evidence (6) / findings (5).
  *  11. SavedQuery, GeneratedReport — leaves, engagement-scoped only.
+ *  12. AuditEntry             — last, because its `entityId` remap needs the
+ *                             new ids of everything above; then the import's own
+ *                             summary entry, so it is the newest row in the log.
  *
  * Every `@@unique` an import could violate is satisfied by construction:
  * `Engagement.slug` (uniquified below, with the index as backstop),
@@ -935,15 +1026,19 @@ async function insertEngagement(
   // 8b. Discussion comments. A comment whose evidence the file never defines has
   // nowhere to hang, so it is dropped and counted.
   const commentRows: Prisma.EvidenceCommentCreateManyInput[] = [];
+  // Old→new comment uuid, for the audit entries' `entityId` remap below.
+  const commentUuidMap = new Map<string, string>();
   for (const comment of data.evidenceComments) {
     const ownerId = evidenceId(comment.evidenceUuid);
     if (ownerId === undefined) {
       dropped.danglingEvidenceRefs++;
       continue;
     }
+    const uuid = randomUUID();
+    commentUuidMap.set(comment.uuid, uuid);
     commentRows.push({
       // Fresh uuid: `EvidenceComment.uuid` is globally unique too.
-      uuid: randomUUID(),
+      uuid,
       evidenceId: ownerId,
       authorId: ins.authorId(comment.authorEmail),
       body: comment.body,
@@ -1086,10 +1181,13 @@ async function insertEngagement(
   // carried verbatim rather than reassigned: the label is what an attestation
   // letter named, and `recordGeneratedReport` counts existing rows, so the next
   // report generated on the new engagement simply continues after this history.
+  const reportUuidMap = new Map<string, string>();
   const reportRows: Prisma.GeneratedReportCreateManyInput[] = data.generatedReports.map((r, i) => {
     const blob = ins.reportBlobs[i];
+    const uuid = randomUUID();
+    reportUuidMap.set(r.uuid, uuid);
     return {
-      uuid: randomUUID(),
+      uuid,
       engagementId,
       preset: r.preset,
       label: r.label,
@@ -1106,6 +1204,86 @@ async function insertEngagement(
     };
   });
   if (reportRows.length > 0) await tx.generatedReport.createMany({ data: reportRows });
+
+  // 12. The audit log, as content. See the module header: fresh uuid, re-stamped
+  // to this engagement, `source: 'import'`, never coalescing, actor FK resolved
+  // quietly, `entityId` remapped where the file lets it be and nulled otherwise.
+  // The model's own route guard is not in play here — the guard trigger allows
+  // INSERT — and the backstop is suppressed, so `createMany` writes no entry.
+  const remapEntityId = (entityType: string, oldId: string | null): string | null => {
+    if (oldId === null) return null;
+    switch (entityType) {
+      case 'engagement':
+        return String(engagementId);
+      case 'evidence':
+        return ins.evidenceUuidMap.get(oldId) ?? null;
+      case 'finding':
+        return ins.findingUuidMap.get(oldId) ?? null;
+      case 'evidence_comment':
+        return commentUuidMap.get(oldId) ?? null;
+      case 'generated_report':
+        return reportUuidMap.get(oldId) ?? null;
+      case 'finding_evidence': {
+        // `${findingUuid}:${evidenceUuid}` — both halves must remap or neither.
+        const [f, e] = oldId.split(':');
+        const nf = f === undefined ? undefined : ins.findingUuidMap.get(f);
+        const ne = e === undefined ? undefined : ins.evidenceUuidMap.get(e);
+        return nf !== undefined && ne !== undefined ? `${nf}:${ne}` : null;
+      }
+      default:
+        // Tags, targets, goals, members, report configs…: a numeric id or a
+        // name on another server. Nothing here to point at.
+        return null;
+    }
+  };
+  const auditRows: Prisma.AuditEntryCreateManyInput[] = data.auditEntries.map((a) => ({
+    uuid: randomUUID(),
+    engagementId,
+    engagementSlug: engagement.slug,
+    engagementName: engagement.name,
+    actorId: a.actorEmail ? (ins.userIdByEmail.get(a.actorEmail.toLowerCase()) ?? null) : null,
+    actorName: a.actorName,
+    actorEmail: a.actorEmail,
+    via: a.via,
+    action: a.action,
+    entityType: a.entityType,
+    entityId: remapEntityId(a.entityType, a.entityId),
+    entityLabel: a.entityLabel,
+    summary: a.summary,
+    changes: asJson(a.changes),
+    coalesceKey: null,
+    coalescedCount: a.coalescedCount,
+    source: 'import',
+    createdAt: new Date(a.createdAt),
+    lastAt: new Date(a.lastAt),
+  }));
+  if (auditRows.length > 0) await tx.auditEntry.createMany({ data: auditRows });
+
+  // Then the import's own entry — the one thing this transaction records about
+  // itself, written last so it is the newest row in the restored log. It names
+  // the source engagement and the archive's exportedAt, which is the only place
+  // the restored entries' provenance survives, and carries the counts so the
+  // admin log can say how much arrived (and how much a truncated file lacked).
+  const auditTotal = ins.manifest.counts.auditEntriesTotal;
+  await recordAudit(inTx(args.audit, tx), {
+    action: 'import',
+    entityType: 'engagement',
+    entity: { id: String(engagementId), label: engagement.name },
+    engagement: { id: engagementId, slug: engagement.slug, name: engagement.name },
+    summary: `Imported engagement ${q(engagement.name)} from a backup of ${q(src.name)} (${src.slug}, exported ${data.exportedAt}): ${data.evidence.length} evidence, ${data.findings.length} findings, ${auditRows.length} audit entries${
+      auditTotal > auditRows.length ? ` of ${auditTotal} in the source` : ''
+    }`,
+    changes: [
+      { kind: 'field', field: 'sourceSlug', from: null, to: src.slug },
+      { kind: 'field', field: 'sourceName', from: null, to: src.name },
+      { kind: 'field', field: 'exportedAt', from: null, to: data.exportedAt },
+      { kind: 'count', label: 'Evidence', count: data.evidence.length },
+      { kind: 'count', label: 'Findings', count: data.findings.length },
+      { kind: 'count', label: 'Reports', count: reportRows.length },
+      { kind: 'count', label: 'Audit entries restored', count: auditRows.length },
+      { kind: 'count', label: 'Audit entries in source', count: auditTotal },
+    ],
+  });
 
   app.log.debug({ engagementId, slug }, 'engagement import: rows created');
 
@@ -1126,6 +1304,10 @@ async function insertEngagement(
       goalFindingLinks: goalFindingRows.length,
       savedQueries: queryRows.length,
       generatedReports: reportRows.length,
+      // Restored, and how many the source had: they differ when the file was
+      // truncated at export (or trimmed to the same bound here).
+      auditEntries: auditRows.length,
+      auditEntriesTotal: Math.max(auditTotal, auditRows.length),
     },
   };
 }

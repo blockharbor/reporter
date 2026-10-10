@@ -9,6 +9,8 @@ import {
   ENGAGEMENT_EXPORT_BLOB_PREFIX,
   ENGAGEMENT_EXPORT_DATA_ENTRY,
   ENGAGEMENT_EXPORT_MANIFEST_ENTRY,
+  ENGAGEMENT_EXPORT_VERSION,
+  ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG,
   ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS,
   SCRIPT_NOT_TEXT_REASON,
   slugSchema,
@@ -16,7 +18,14 @@ import {
   type ExecutionSubsection,
   type RecommendationItem,
 } from '@reporter/shared';
-import { WEB_HEADERS, buildTestApp, loginCookie, seedUsers, truncateAll } from './helpers.js';
+import {
+  WEB_HEADERS,
+  buildTestApp,
+  loginCookie,
+  seedUsers,
+  truncateAll,
+  truncateAuditLog,
+} from './helpers.js';
 
 let app: FastifyInstance;
 
@@ -1113,5 +1122,335 @@ describe('script evidence in an archive is validated, not trusted', () => {
     });
     expect(imported.contentSubtype).toBe('bash');
     expect(await app.blobs.getBuffer(imported.fullBlobKey!)).toEqual(body);
+  });
+});
+
+/**
+ * The audit log travels as content (export v3) and comes back marked. These
+ * cases seed the log by hand after wiping what the backstop recorded for the
+ * fixtures, so every count below is exact.
+ */
+describe('the audit log travels with the engagement', () => {
+  /** One live entry, as the writer would have made it, about a given entity. */
+  function auditRow(
+    eng: { id: number; slug: string; name: string },
+    actor: { id: number | null; name: string; email: string },
+    entity: { type: string; id: string | null; label: string },
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      engagementId: eng.id,
+      engagementSlug: eng.slug,
+      engagementName: eng.name,
+      actorId: actor.id,
+      actorName: actor.name,
+      actorEmail: actor.email,
+      via: 'session',
+      action: 'update',
+      entityType: entity.type,
+      entityId: entity.id,
+      entityLabel: entity.label,
+      summary: `Edited ${entity.type} “${entity.label}”: Description`,
+      changes: [{ kind: 'field', field: 'description', from: 'before', to: 'after' }],
+      coalesceKey: 'description',
+      coalescedCount: 3,
+      source: 'intent',
+      createdAt: new Date('2026-02-01T10:00:00Z'),
+      lastAt: new Date('2026-02-01T10:02:00Z'),
+      ...overrides,
+    };
+  }
+
+  async function seedWithLog() {
+    const seeded = await seedEngagement();
+    await truncateAuditLog(app);
+    const { users, eng, parent } = seeded;
+    const writer = { id: users.writer.id, name: 'Wendy Writer', email: users.writer.email };
+    const oldest = await app.db.auditEntry.create({
+      data: auditRow(
+        eng,
+        writer,
+        { type: 'engagement', id: String(eng.id), label: eng.name },
+        {
+          action: 'create',
+          summary: 'Created engagement “Op One” (op1)',
+          changes: [{ kind: 'count', label: 'Default tags copied', count: 0 }],
+          coalesceKey: null,
+          coalescedCount: 1,
+          createdAt: new Date('2026-01-01T09:00:00Z'),
+          lastAt: new Date('2026-01-01T09:00:00Z'),
+        },
+      ),
+    });
+    const evidenceEdit = await app.db.auditEntry.create({
+      data: auditRow(eng, writer, { type: 'evidence', id: parent.uuid, label: 'Screenshot' }),
+    });
+    // An actor with no account here — a colleague on the server the file came
+    // from. The snapshot is the attribution; nothing is "unmatched".
+    const ghostEdit = await app.db.auditEntry.create({
+      data: auditRow(
+        eng,
+        { id: null, name: 'Gus Ghost', email: 'ghost@elsewhere.test' },
+        { type: 'tag', id: '42', label: 'can' },
+        { createdAt: new Date('2026-03-01T10:00:00Z'), lastAt: new Date('2026-03-01T10:00:00Z') },
+      ),
+    });
+    return { ...seeded, writer, oldest, evidenceEdit, ghostEdit };
+  }
+
+  it('restores every entry marked as imported, re-pointed at the new engagement', async () => {
+    const { oldest, evidenceEdit, ghostEdit, users } = await seedWithLog();
+    const cookie = await loginCookie(app, 'admin@test.local', 'password123');
+    const archive = await exportArchive(cookie);
+    // The export itself was recorded, after the file was built — and so is not
+    // in the file. Cleared here so the counts below are the three seeded rows.
+    await truncateAuditLog(app);
+
+    const res = await importArchive(cookie, archive);
+    expect(res.statusCode).toBe(200);
+    const result = res.json<EngagementImportResult>();
+    expect(result.created.auditEntries).toBe(3);
+    expect(result.created.auditEntriesTotal).toBe(3);
+    // A missing actor account is not a dropped author: the entry keeps its
+    // name and email, and nothing is reported as unmatched.
+    expect(result.dropped.unmatchedAuthorEmails).toEqual([]);
+    expect(result.dropped.unmatchedAuthorRefs).toBe(0);
+
+    const copy = await loadCopy(result.engagement.slug);
+    const restored = await app.db.auditEntry.findMany({
+      where: { engagementId: copy.id, source: 'import' },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(restored).toHaveLength(3);
+    for (const row of restored) {
+      expect(row.engagementSlug).toBe(copy.slug);
+      expect(row.engagementName).toBe(copy.name);
+      expect(row.coalesceKey).toBeNull();
+      expect(row.deletedAt).toBeNull();
+      expect([oldest.uuid, evidenceEdit.uuid, ghostEdit.uuid]).not.toContain(row.uuid);
+    }
+    const [first, second, third] = restored as [
+      (typeof restored)[number],
+      (typeof restored)[number],
+      (typeof restored)[number],
+    ];
+    // Content preserved verbatim: summary, changes, the fold count, both times.
+    expect(first).toMatchObject({
+      action: 'create',
+      entityType: 'engagement',
+      entityId: String(copy.id),
+      summary: 'Created engagement “Op One” (op1)',
+      coalescedCount: 1,
+      createdAt: new Date('2026-01-01T09:00:00Z'),
+    });
+    expect(second).toMatchObject({
+      action: 'update',
+      entityType: 'evidence',
+      entityLabel: 'Screenshot',
+      summary: 'Edited evidence “Screenshot”: Description',
+      changes: [{ kind: 'field', field: 'description', from: 'before', to: 'after' }],
+      coalescedCount: 3,
+      createdAt: new Date('2026-02-01T10:00:00Z'),
+      lastAt: new Date('2026-02-01T10:02:00Z'),
+      actorId: users.writer.id,
+      actorName: 'Wendy Writer',
+      actorEmail: users.writer.email,
+    });
+    // The evidence entry now points at the COPY's screenshot, not the source's.
+    const screenshot = copy.evidence.find((e) => e.title === 'Screenshot')!;
+    expect(second.entityId).toBe(screenshot.uuid);
+    // A tag has no uuid to carry across servers: the reference is dropped, the
+    // label and summary keep the entry readable. The actor stays a snapshot.
+    expect(third).toMatchObject({
+      entityType: 'tag',
+      entityId: null,
+      entityLabel: 'can',
+      actorId: null,
+      actorName: 'Gus Ghost',
+      actorEmail: 'ghost@elsewhere.test',
+    });
+
+    // And the import wrote exactly one entry of its own: the summary, by the
+    // admin, on the new engagement, naming where the file came from — the
+    // newest row in the restored log.
+    const own = await app.db.auditEntry.findMany({
+      where: { engagementId: copy.id, source: { not: 'import' } },
+    });
+    expect(own).toHaveLength(1);
+    expect(own[0]).toMatchObject({
+      action: 'import',
+      entityType: 'engagement',
+      entityId: String(copy.id),
+      source: 'intent',
+      actorEmail: 'admin@test.local',
+      engagementSlug: copy.slug,
+    });
+    expect(own[0]!.summary).toContain('from a backup of “Op One” (op1');
+    expect(own[0]!.summary).toContain('3 audit entries');
+    expect(own[0]!.changes).toEqual(
+      expect.arrayContaining([
+        { kind: 'count', label: 'Audit entries restored', count: 3 },
+        { kind: 'count', label: 'Audit entries in source', count: 3 },
+        { kind: 'field', field: 'sourceSlug', from: null, to: 'op1' },
+      ]),
+    );
+    // No per-row entries leaked past the importer scope: three restored, one
+    // summary, nothing else on the new engagement.
+    expect(await app.db.auditEntry.count({ where: { engagementId: copy.id } })).toBe(4);
+  });
+
+  it('remaps a restored report and comment entry to the copy’s own rows', async () => {
+    const seeded = await seedWithLog();
+    const { eng, users, report, comment } = seeded;
+    const writer = { id: users.writer.id, name: 'Wendy Writer', email: users.writer.email };
+    // Two entries whose entity is a row that gets a fresh uuid on import — the
+    // exact pair the importer must remap through commentUuidMap / reportUuidMap.
+    // Before the fix these fell through to `default` and arrived with entityId
+    // null, breaking the entity-scoped history of every imported report/comment.
+    await app.db.auditEntry.create({
+      data: auditRow(
+        eng,
+        writer,
+        { type: 'generated_report', id: report.uuid, label: 'Full report v1.0' },
+        {
+          action: 'report_generated',
+          summary: 'Generated report v1.0 (PDF) — Full report',
+          coalesceKey: null,
+          coalescedCount: 1,
+          createdAt: new Date('2026-04-01T10:00:00Z'),
+          lastAt: new Date('2026-04-01T10:00:00Z'),
+        },
+      ),
+    });
+    await app.db.auditEntry.create({
+      data: auditRow(
+        eng,
+        writer,
+        { type: 'evidence_comment', id: comment.uuid, label: 'Evidence note' },
+        {
+          action: 'create',
+          summary: 'Added an evidence note',
+          coalesceKey: null,
+          coalescedCount: 1,
+          createdAt: new Date('2026-05-01T10:00:00Z'),
+          lastAt: new Date('2026-05-01T10:00:00Z'),
+        },
+      ),
+    });
+
+    const cookie = await loginCookie(app, 'admin@test.local', 'password123');
+    const archive = await exportArchive(cookie);
+    await truncateAuditLog(app);
+    const res = await importArchive(cookie, archive);
+    expect(res.statusCode).toBe(200);
+
+    const copy = await loadCopy(res.json<EngagementImportResult>().engagement.slug);
+    const copyReport = copy.generatedReports[0]!;
+    const copyComment = copy.evidence.flatMap((e) => e.commentThread)[0]!;
+    // The copy's rows have fresh uuids — the remap had something to change.
+    expect(copyReport.uuid).not.toBe(report.uuid);
+    expect(copyComment.uuid).not.toBe(comment.uuid);
+
+    const restoredReport = await app.db.auditEntry.findFirstOrThrow({
+      where: { engagementId: copy.id, entityType: 'generated_report', source: 'import' },
+    });
+    const restoredComment = await app.db.auditEntry.findFirstOrThrow({
+      where: { engagementId: copy.id, entityType: 'evidence_comment', source: 'import' },
+    });
+    expect(restoredReport.entityId).toBe(copyReport.uuid);
+    expect(restoredComment.entityId).toBe(copyComment.uuid);
+  });
+
+  it('does not carry a removed entry, and refuses a file that tries to arrive with one', async () => {
+    const { ghostEdit, users } = await seedWithLog();
+    // Remove the ghost's entry on the source server, exactly as the admin route
+    // would: the transition the guard trigger allows.
+    await app.db.auditEntry.updateMany({
+      where: { id: ghostEdit.id },
+      data: {
+        deletedAt: new Date(),
+        deletedById: users.admin.id,
+        deletedByName: 'Ada Admin',
+        deletedByEmail: users.admin.email,
+        deletedReason: 'Pasted a credential.',
+        summary: '',
+        entityLabel: '',
+        changes: [],
+      },
+    });
+    const cookie = await loginCookie(app, 'admin@test.local', 'password123');
+    const archive = await exportArchive(cookie);
+    const { files } = await readZip(archive);
+    const data = JSON.parse(files.get(ENGAGEMENT_EXPORT_DATA_ENTRY)!.toString('utf8'));
+    const manifest = JSON.parse(files.get(ENGAGEMENT_EXPORT_MANIFEST_ENTRY)!.toString('utf8'));
+    expect(data.auditEntries).toHaveLength(2);
+    expect(manifest.counts).toMatchObject({ auditEntries: 2, auditEntriesTotal: 2 });
+    for (const entry of data.auditEntries) {
+      expect(Object.keys(entry).some((k) => k.startsWith('deleted'))).toBe(false);
+    }
+
+    // A hand-edited file: one entry arrives pre-removed. zod would strip the
+    // key and import it as a live entry, so it is refused on the raw JSON.
+    const forged = await rewriteZip(archive, (zipFiles, names) => {
+      const edited = JSON.parse(zipFiles.get(ENGAGEMENT_EXPORT_DATA_ENTRY)!.toString('utf8'));
+      edited.auditEntries[1].deletedAt = new Date().toISOString();
+      edited.auditEntries[1].deletedReason = 'arrived removed';
+      zipFiles.set(ENGAGEMENT_EXPORT_DATA_ENTRY, Buffer.from(JSON.stringify(edited)));
+      return names;
+    });
+    const res = await importArchive(cookie, forged);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/Audit entry 1 .*removal field \(deletedAt\)/);
+    expect(await app.db.engagement.count()).toBe(1);
+  });
+
+  it('imports a v2 backup (no audit log) and a log-less v3 export the same way', async () => {
+    await seedWithLog();
+    const cookie = await loginCookie(app, 'admin@test.local', 'password123');
+    const archive = await exportArchive(cookie);
+
+    // The shape every backup had before the log travelled: no `auditEntries`
+    // key at all, stamped v2 in both places.
+    const legacy = await rewriteZip(archive, (files, names) => {
+      const data = JSON.parse(files.get(ENGAGEMENT_EXPORT_DATA_ENTRY)!.toString('utf8'));
+      delete data.auditEntries;
+      data.schemaVersion = ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG;
+      files.set(ENGAGEMENT_EXPORT_DATA_ENTRY, Buffer.from(JSON.stringify(data)));
+      const manifest = JSON.parse(files.get(ENGAGEMENT_EXPORT_MANIFEST_ENTRY)!.toString('utf8'));
+      manifest.schemaVersion = ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG;
+      delete manifest.counts.auditEntries;
+      delete manifest.counts.auditEntriesTotal;
+      files.set(ENGAGEMENT_EXPORT_MANIFEST_ENTRY, Buffer.from(JSON.stringify(manifest)));
+      return names;
+    });
+    const res = await importArchive(cookie, legacy);
+    expect(res.statusCode).toBe(200);
+    const result = res.json<EngagementImportResult>();
+    expect(result.created.auditEntries).toBe(0);
+    expect(result.created.auditEntriesTotal).toBe(0);
+    const copy = await loadCopy(result.engagement.slug);
+    const rows = await app.db.auditEntry.findMany({ where: { engagementId: copy.id } });
+    // Only the import's own summary entry.
+    expect(rows.map((r) => r.action)).toEqual(['import']);
+    expect(rows[0]!.summary).toContain('0 audit entries');
+
+    // `?includeAuditLog=0` produces the same thing from a live server, and the
+    // stamp drops to the finding-tags rule — a file that imports anywhere.
+    const trimmed = await app.inject({
+      method: 'GET',
+      url: '/web/engagements/op1/export.zip?includeAuditLog=0',
+      headers: { ...WEB_HEADERS, cookie },
+    });
+    expect(trimmed.statusCode).toBe(200);
+    const { files } = await readZip(trimmed.rawPayload);
+    const data = JSON.parse(files.get(ENGAGEMENT_EXPORT_DATA_ENTRY)!.toString('utf8'));
+    expect(data.auditEntries).toEqual([]);
+    // This fixture tags a finding, so the file still needs the v2 reader — but
+    // nothing in it needs v3.
+    expect(data.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG);
+    expect(data.schemaVersion).not.toBe(ENGAGEMENT_EXPORT_VERSION);
+    const again = await importArchive(cookie, trimmed.rawPayload);
+    expect(again.statusCode).toBe(200);
+    expect(again.json<EngagementImportResult>().created.auditEntries).toBe(0);
   });
 });

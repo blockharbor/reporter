@@ -8,13 +8,24 @@
  */
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
+import Fastify from 'fastify';
 import { scoreVector } from '@reporter/shared';
 import sharp from 'sharp';
+import { runAsSystem, withImporter } from '../src/audit/context.js';
+import { createAuditedDb } from '../src/audit/extension.js';
 import { LocalStore } from '../src/blobstore/local.js';
+import { auditCtxFromContext, n, q, recordAudit } from '../src/services/audit.js';
 import { createLocalUser } from '../src/services/users.js';
 import { generateApiKey } from '../src/services/apikeys.js';
 
-const db = new PrismaClient();
+// The server's own logger without a server: the backstop and the recorder log
+// through a Fastify logger, and pino is fastify's dependency, not ours.
+const log = Fastify({ logger: { level: 'warn' } }).log;
+// Through the audit factory, as app.ts does: the seed is the only other place
+// a PrismaClient is constructed, and a client that bypasses the backstop would
+// be the one hole in "every write is recorded". Under `withImporter` below the
+// backstop counts rows instead of recording hundreds of anonymous entries.
+const db = createAuditedDb(new PrismaClient(), log);
 const blobs = new LocalStore(process.env.BLOB_DIR ?? './.data/blobs');
 
 const DEFAULT_TAGS = [
@@ -34,7 +45,17 @@ async function putBlob(data: Buffer): Promise<string> {
   return key;
 }
 
+/**
+ * Runs the seed as the system actor inside an importer scope, so a seeded
+ * database carries ONE audit entry — "seeded the demo engagement, N rows" —
+ * rather than a per-row entry for every tag, finding and evidence item, none
+ * of which anyone chose to create.
+ */
 async function main() {
+  await runAsSystem(() => withImporter('seed', seed), log);
+}
+
+async function seed(counts: Record<string, number>) {
   // --- Users ---
   let admin = await db.user.findUnique({ where: { email: 'admin@reporter.local' } });
   if (!admin) {
@@ -331,6 +352,24 @@ async function main() {
 
   // --- API key for the operator ---
   const key = await generateApiKey(db, operator.id);
+
+  // --- The one audit entry the seed leaves: a system row on the demo
+  // engagement, with the per-model row counts the backstop tallied while it was
+  // silent. Written through the recorder so it carries the same validation and
+  // caps as every other row.
+  const total = Object.values(counts).reduce((sum, c) => sum + c, 0);
+  const ref = { id: eng.id, slug: eng.slug, name: eng.name };
+  await recordAudit(auditCtxFromContext(db, log, ref), {
+    action: 'import',
+    entityType: 'engagement',
+    entity: { id: String(eng.id), label: eng.name },
+    summary: `Seeded the demo engagement ${q(eng.name)} (${n(total, 'row')})`,
+    changes: Object.entries(counts).map(([model, count]) => ({
+      kind: 'count',
+      label: model,
+      count,
+    })),
+  });
 
   console.log('\n✔ Seed complete.');
   console.log('  Admin login:    admin@reporter.local / reporter-dev');

@@ -25,6 +25,18 @@ import {
   serializeEvidenceComment,
 } from '../../services/serializers.js';
 import { evidenceContentMime, parseEvidenceRequest } from '../shared-evidence.js';
+import {
+  auditCtx,
+  coalesceOrInsert,
+  diffEvidence,
+  inTx,
+  n,
+  q,
+  recordAudit,
+  recordUpdate,
+  withIntent,
+  type EvidenceAuditRow,
+} from '../../services/audit.js';
 
 async function engagementBySlug(app: FastifyInstance, slug: string) {
   return app.db.engagement.findUniqueOrThrow({ where: { slug } });
@@ -130,6 +142,8 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
         operatorId: req.authedUser!.id,
         metadata,
         file,
+        // The entry is written inside the service, shared with the HMAC plane.
+        audit: auditCtx(req, { id: eng.id, slug, name: eng.name }),
       });
       reply.status(201);
       return evidence;
@@ -230,6 +244,25 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       reply.header('X-Content-Type-Options', 'nosniff');
       reply.header('Content-Disposition', evidenceDisposition(ev));
       reply.header('Cache-Control', 'private, max-age=3600');
+      // A content view is a read the backstop cannot see, and DECISIONS lists
+      // evidence blob downloads among the events the log holds. Recorded after
+      // the blob is in hand, so a 404 never logs, and AWAITED, because no audit
+      // write may outlive its request (audit/context.ts) — the insert is one
+      // short statement against a row that is folded, not multiplied: this route
+      // is also how the viewer renders a screenshot full-size, so every fetch by
+      // the same person of the same item within the coalescing window folds into
+      // one entry on the fixed key `download`, with `coalescedCount` as the
+      // volume. No `changes`: the fold rewrites nothing, and the size lives on
+      // the evidence. Thumbnails (below) are never recorded — they render in
+      // every timeline row and would log page views.
+      const label = ev.title || `${typeLabel(ev.contentType)} ${ev.uuid.slice(0, 8)}`;
+      await coalesceOrInsert(auditCtx(req, { id: eng.id, slug, name: eng.name }), {
+        action: 'download',
+        entityType: 'evidence',
+        entity: { id: ev.uuid, label },
+        summary: `Downloaded evidence ${q(label)} (${typeLabel(ev.contentType)})`,
+        coalesceKey: 'download',
+      });
       return reply.send(blob);
     },
   );
@@ -397,7 +430,16 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       const eng = await engagementBySlug(app, slug);
       const body = updateEvidenceInput.parse(req.body);
 
-      const ev = await app.db.evidence.findFirst({ where: { uuid, engagementId: eng.id } });
+      // The before-image for the audit diff rides on the same read: the tag names
+      // and the parent's uuid are what `diffEvidence` compares.
+      const auditInclude = {
+        tags: { select: { tag: { select: { name: true } } } },
+        parent: { select: { uuid: true, title: true } },
+      } as const;
+      const ev = await app.db.evidence.findFirst({
+        where: { uuid, engagementId: eng.id },
+        include: auditInclude,
+      });
       if (!ev) throw new HttpError(404, 'Evidence not found');
 
       // Re-parenting the comment link (attach/move/detach). Only touched when the
@@ -551,85 +593,161 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
         }
       }
 
-      await app.db.$transaction(async (tx) => {
-        if (reparent && body.parentEvidenceUuid !== null) {
-          // Attach/move: resolve the target, then lock BOTH the subject and target
-          // rows FOR UPDATE (ordered by id to avoid deadlock) and re-check the
-          // one-level-deep invariant under the lock. Validating inside the transaction
-          // closes the check-then-act race where two concurrent re-parents could
-          // otherwise slip past and build a cycle (A↔B) or a 2-level chain.
-          const target = await tx.evidence.findFirst({
-            where: { uuid: body.parentEvidenceUuid, engagementId: eng.id },
-            select: { id: true },
-          });
-          if (!target) throw new HttpError(400, 'Target evidence not found in this engagement.');
-
-          const ids = [ev.id, target.id].sort((a, b) => a - b);
-          await tx.$queryRaw`SELECT id FROM evidence WHERE id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`;
-
-          // Target must (still) be top-level — no commenting on a comment.
-          const targetRow = await tx.evidence.findUnique({
-            where: { id: target.id },
-            select: { parentEvidenceId: true },
-          });
-          if (!targetRow) throw new HttpError(400, 'Target evidence not found in this engagement.');
-          if (targetRow.parentEvidenceId !== null) {
-            throw new HttpError(
-              400,
-              'Cannot comment on a comment (linked evidence is one level deep)',
-            );
-          }
-          // The evidence being re-linked must (still) not host its own comments — a
-          // comment can't have children.
-          const childCount = await tx.evidence.count({ where: { parentEvidenceId: ev.id } });
-          if (childCount > 0) {
-            throw new HttpError(
-              400,
-              `Detach its ${childCount} comment(s) first — comments are one level deep.`,
-            );
-          }
-          parentEvidenceId = target.id;
-        }
-
-        await tx.evidence.update({
+      // What this save will leave behind, predicted from the patch before any
+      // write — the gate on recording. A save that changes nothing (the editor's
+      // Save button with nothing edited; an interpreter cleared when it was
+      // already clear) still stamps `lastEditedById`, which the audit diff
+      // deliberately does not carry (it IS the actor). `recordUpdate` writes
+      // nothing for an empty diff, and a `withIntent` scope that writes its
+      // model and records nothing is the condition the tripwire catches, so the
+      // no-op save takes a different path below: one plain update outside any
+      // transaction, where the backstop sees it and stays silent because only
+      // ignored columns moved. The prediction is faithful by construction — every
+      // input to `diffEvidence` is either carried over from `ev` or is the exact
+      // value the transaction writes, and the tag names are filtered by the same
+      // engagement check the transaction applies.
+      const tagNames = body.tagIds
+        ? (
+            await app.db.tag.findMany({
+              where: { id: { in: body.tagIds }, engagementId: eng.id },
+              select: { name: true },
+            })
+          ).map((t) => ({ tag: { name: t.name } }))
+        : ev.tags;
+      const predictedAfter: EvidenceAuditRow = {
+        title: body.title ?? ev.title,
+        description: body.description ?? ev.description,
+        occurredAt: body.occurredAt ? new Date(body.occurredAt) : ev.occurredAt,
+        contentType: body.contentType ?? ev.contentType,
+        contentSubtype: subtypePatch ? subtypePatch.contentSubtype : ev.contentSubtype,
+        excludeFromReport: body.excludeFromReport ?? ev.excludeFromReport,
+        sha256: blobPatch ? blobPatch.sha256 : ev.sha256,
+        sizeBytes: blobPatch ? blobPatch.sizeBytes : ev.sizeBytes,
+        parent: reparent
+          ? body.parentEvidenceUuid === null
+            ? null
+            : { uuid: body.parentEvidenceUuid! }
+          : ev.parent,
+        tags: tagNames,
+      };
+      const predicted = diffEvidence(ev, predictedAfter);
+      if (predicted.length === 0) {
+        // The content blob, if one was written above, holds bytes identical to
+        // the stored ones (same sha256, or the diff would not be empty) and no
+        // row will ever point at it — reclaim it rather than leak it.
+        if (blobPatch?.fullBlobKey) await app.blobs.delete(blobPatch.fullBlobKey).catch(() => {});
+        await app.db.evidence.update({
           where: { id: ev.id },
-          data: {
-            title: body.title ?? undefined,
-            description: body.description ?? undefined,
-            occurredAt: body.occurredAt ? new Date(body.occurredAt) : undefined,
-            // Re-label the type, validated above as a move between two text-backed
-            // types. Nothing else moves with it: the blob keys, hash and size stay
-            // as they are, and the content route re-reads this column on every
-            // request, so the MIME it serves — and the download name, where that is
-            // derived from the type rather than taken from `originalFilename` —
-            // follow the new type from the next read on.
-            contentType: body.contentType,
-            // Hide from / re-include in every report output; absent leaves it as it is.
-            // The evidence itself stays fully visible in the app either way.
-            excludeFromReport: body.excludeFromReport,
-            // Record who made this edit (any field), which also bumps updatedAt. That
-            // includes a bare `excludeFromReport` toggle: deciding what the client does
-            // and does not see is exactly what an audit trail should record.
-            lastEditedById: req.authedUser!.id,
-            // Only re-link when the field was present (value may be null for detach).
-            ...(reparent ? { parentEvidenceId } : {}),
-            // Swap the content blob when the body was edited.
-            ...(blobPatch ?? {}),
-            // Re-name the language / interpreter when that field was present.
-            ...(subtypePatch ?? {}),
-          },
+          data: { lastEditedById: req.authedUser!.id },
         });
-        if (body.tagIds) {
-          const valid = await tx.tag.findMany({
-            where: { id: { in: body.tagIds }, engagementId: eng.id },
-            select: { id: true },
+        const unchanged = await app.db.evidence.findUniqueOrThrow({
+          where: { id: ev.id },
+          include: evidenceInclude(req.authedUser!.id),
+        });
+        return serializeEvidence(unchanged, slug);
+      }
+
+      // The transaction writes the evidence row and rewrites its tag links;
+      // both are claimed, and the one entry per changed field is written through
+      // `tx` at the end, from a read-back of the row as the transaction left it,
+      // so a rolled-back save records nothing and a committed one records what
+      // was actually stored.
+      const ctx = auditCtx(req, { id: eng.id, slug, name: eng.name });
+      await withIntent(['evidence', 'evidenceTag'], () =>
+        app.db.$transaction(async (tx) => {
+          if (reparent && body.parentEvidenceUuid !== null) {
+            // Attach/move: resolve the target, then lock BOTH the subject and target
+            // rows FOR UPDATE (ordered by id to avoid deadlock) and re-check the
+            // one-level-deep invariant under the lock. Validating inside the transaction
+            // closes the check-then-act race where two concurrent re-parents could
+            // otherwise slip past and build a cycle (A↔B) or a 2-level chain.
+            const target = await tx.evidence.findFirst({
+              where: { uuid: body.parentEvidenceUuid, engagementId: eng.id },
+              select: { id: true },
+            });
+            if (!target) throw new HttpError(400, 'Target evidence not found in this engagement.');
+
+            const ids = [ev.id, target.id].sort((a, b) => a - b);
+            await tx.$queryRaw`SELECT id FROM evidence WHERE id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`;
+
+            // Target must (still) be top-level — no commenting on a comment.
+            const targetRow = await tx.evidence.findUnique({
+              where: { id: target.id },
+              select: { parentEvidenceId: true },
+            });
+            if (!targetRow)
+              throw new HttpError(400, 'Target evidence not found in this engagement.');
+            if (targetRow.parentEvidenceId !== null) {
+              throw new HttpError(
+                400,
+                'Cannot comment on a comment (linked evidence is one level deep)',
+              );
+            }
+            // The evidence being re-linked must (still) not host its own comments — a
+            // comment can't have children.
+            const childCount = await tx.evidence.count({ where: { parentEvidenceId: ev.id } });
+            if (childCount > 0) {
+              throw new HttpError(
+                400,
+                `Detach its ${childCount} comment(s) first — comments are one level deep.`,
+              );
+            }
+            parentEvidenceId = target.id;
+          }
+
+          await tx.evidence.update({
+            where: { id: ev.id },
+            data: {
+              title: body.title ?? undefined,
+              description: body.description ?? undefined,
+              occurredAt: body.occurredAt ? new Date(body.occurredAt) : undefined,
+              // Re-label the type, validated above as a move between two text-backed
+              // types. Nothing else moves with it: the blob keys, hash and size stay
+              // as they are, and the content route re-reads this column on every
+              // request, so the MIME it serves — and the download name, where that is
+              // derived from the type rather than taken from `originalFilename` —
+              // follow the new type from the next read on.
+              contentType: body.contentType,
+              // Hide from / re-include in every report output; absent leaves it as it is.
+              // The evidence itself stays fully visible in the app either way.
+              excludeFromReport: body.excludeFromReport,
+              // Record who made this edit (any field), which also bumps updatedAt. That
+              // includes a bare `excludeFromReport` toggle: deciding what the client does
+              // and does not see is exactly what an audit trail should record.
+              lastEditedById: req.authedUser!.id,
+              // Only re-link when the field was present (value may be null for detach).
+              ...(reparent ? { parentEvidenceId } : {}),
+              // Swap the content blob when the body was edited.
+              ...(blobPatch ?? {}),
+              // Re-name the language / interpreter when that field was present.
+              ...(subtypePatch ?? {}),
+            },
           });
-          await tx.evidenceTag.deleteMany({ where: { evidenceId: ev.id } });
-          await tx.evidenceTag.createMany({
-            data: valid.map((t) => ({ evidenceId: ev.id, tagId: t.id })),
+          if (body.tagIds) {
+            const valid = await tx.tag.findMany({
+              where: { id: { in: body.tagIds }, engagementId: eng.id },
+              select: { id: true },
+            });
+            await tx.evidenceTag.deleteMany({ where: { evidenceId: ev.id } });
+            await tx.evidenceTag.createMany({
+              data: valid.map((t) => ({ evidenceId: ev.id, tagId: t.id })),
+            });
+          }
+          const after = await tx.evidence.findUniqueOrThrow({
+            where: { id: ev.id },
+            include: auditInclude,
           });
-        }
-      });
+          await recordUpdate(inTx(ctx, tx), {
+            entityType: 'evidence',
+            entity: {
+              id: ev.uuid,
+              label: ev.title || `${typeLabel(ev.contentType)} ${ev.uuid.slice(0, 8)}`,
+            },
+            noun: 'evidence',
+            changes: diffEvidence(ev, after),
+          });
+        }),
+      );
 
       // Reclaim the replaced/cleared content blob now the swap has committed.
       if (editingContent && ev.fullBlobKey && ev.fullBlobKey !== blobPatch?.fullBlobKey) {
@@ -662,6 +780,26 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
       // comment's when cascading (orphaned comments keep their content).
       const blobKeys: (string | null)[] = [ev.fullBlobKey, ev.thumbBlobKey];
 
+      // One entry for the whole operation, hand-written because the row-level
+      // truth of a cascade is N+1 deletes that never say they were one decision,
+      // and of an orphan delete is a parent gone and its comments silently
+      // re-homed by the SetNull. Both branches claim `evidence` for the scope;
+      // the entry is written after the rows are gone, best-effort, since an
+      // evidence delete is not one of the destructive admin flows whose record
+      // must commit with the work. The type and the report-exclusion flag ride
+      // along so the log shows whether a report-hidden item was removed.
+      const label = ev.title || `${typeLabel(ev.contentType)} ${ev.uuid.slice(0, 8)}`;
+      const ctx = auditCtx(req, { id: eng.id, slug, name: eng.name });
+      const stateChanges = [
+        { kind: 'field' as const, field: 'contentType', from: ev.contentType, to: null },
+        {
+          kind: 'field' as const,
+          field: 'excludeFromReport',
+          from: ev.excludeFromReport,
+          to: null,
+        },
+      ];
+
       if (mode === 'cascade') {
         // Read the comments here so the rows we delete and the blobs we reclaim come
         // from the same set. A comment created concurrently (after this read) isn't
@@ -669,16 +807,56 @@ export async function evidenceRoutes(app: FastifyInstance): Promise<void> {
         // blob intact rather than leaking it.
         const comments = await app.db.evidence.findMany({
           where: { parentEvidenceId: ev.id },
-          select: { id: true, fullBlobKey: true, thumbBlobKey: true },
+          select: {
+            id: true,
+            title: true,
+            contentType: true,
+            fullBlobKey: true,
+            thumbBlobKey: true,
+          },
         });
         for (const c of comments) blobKeys.push(c.fullBlobKey, c.thumbBlobKey);
-        await app.db.$transaction([
-          app.db.evidence.deleteMany({ where: { id: { in: comments.map((c) => c.id) } } }),
-          app.db.evidence.delete({ where: { id: ev.id } }),
-        ]);
+        await withIntent(['evidence'], async () => {
+          await app.db.$transaction([
+            app.db.evidence.deleteMany({ where: { id: { in: comments.map((c) => c.id) } } }),
+            app.db.evidence.delete({ where: { id: ev.id } }),
+          ]);
+          await recordAudit(ctx, {
+            action: 'delete',
+            entityType: 'evidence',
+            entity: { id: ev.uuid, label },
+            summary: `Deleted evidence ${q(label)} and its ${n(comments.length, 'comment')}`,
+            changes: [
+              {
+                kind: 'items',
+                label: 'Comments deleted',
+                items: comments.map((c) => c.title || `${typeLabel(c.contentType)} comment`),
+              },
+              ...stateChanges,
+            ],
+          });
+        });
       } else {
         // orphan: deleting the parent nulls each comment's parentEvidenceId.
-        await app.db.evidence.delete({ where: { id: ev.id } });
+        const kept = await app.db.evidence.count({ where: { parentEvidenceId: ev.id } });
+        await withIntent(['evidence'], async () => {
+          await app.db.evidence.delete({ where: { id: ev.id } });
+          await recordAudit(ctx, {
+            action: 'delete',
+            entityType: 'evidence',
+            entity: { id: ev.uuid, label },
+            summary:
+              kept > 0
+                ? `Deleted evidence ${q(label)}; ${n(kept, 'comment')} kept as top-level evidence`
+                : `Deleted evidence ${q(label)}`,
+            changes: [
+              ...(kept > 0
+                ? [{ kind: 'count' as const, label: 'Comments kept', count: kept }]
+                : []),
+              ...stateChanges,
+            ],
+          });
+        });
       }
 
       for (const key of blobKeys) if (key) await app.blobs.delete(key).catch(() => {});

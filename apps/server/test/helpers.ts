@@ -5,6 +5,11 @@ import { createLocalUser } from '../src/services/users.js';
 import { generateApiKey } from '../src/services/apikeys.js';
 
 const TABLES = [
+  // First: it references engagements and users with SET NULL rather than CASCADE,
+  // so it would otherwise survive a truncate of its parents and leak between
+  // cases. TRUNCATE does not fire the row-level guard trigger, which is the only
+  // reason tests can clear a table whose rows can never be DELETEd.
+  'audit_entries',
   'goal_evidence',
   'goal_findings',
   'activity_goals',
@@ -43,6 +48,16 @@ export async function truncateAll(app: FastifyInstance): Promise<void> {
   await app.db.$executeRawUnsafe(
     `TRUNCATE ${TABLES.map((t) => `"${t}"`).join(', ')} RESTART IDENTITY CASCADE`,
   );
+}
+
+/**
+ * The single sanctioned way to clear the audit log mid-test. `deleteMany` is
+ * refused by the guard trigger, and a test that needs a known starting point
+ * after a fixture has already written entries (every seed does) cannot use
+ * `truncateAll` without losing the fixture.
+ */
+export async function truncateAuditLog(app: FastifyInstance): Promise<void> {
+  await app.db.$executeRawUnsafe('TRUNCATE "audit_entries" RESTART IDENTITY');
 }
 
 /** Log in a user over the web plane and return the session cookie header value. */

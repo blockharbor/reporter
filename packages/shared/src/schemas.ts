@@ -20,6 +20,14 @@ import {
   reportPresetSchema,
   generatedReportFormatSchema,
   attestationFrameworkSchema,
+  auditViaSchema,
+  auditActionSchema,
+  auditEntityTypeSchema,
+  auditSourceSchema,
+  auditSortKeySchema,
+  auditSortDirSchema,
+  MAX_AUDIT_CHANGES,
+  AUDIT_DELETE_REASON_MAX_CHARS,
   type ReportPreset,
 } from './enums.js';
 import { cvssVectorSchema } from './cvss.js';
@@ -1285,6 +1293,263 @@ export function paginated<T extends z.ZodTypeAny>(item: T) {
 }
 
 // ---------------------------------------------------------------------------
+// Audit log (the `changes` payload, the entry on the wire, list query, facets,
+// removal). The Prisma model and the reasoning behind it live in
+// apps/server/prisma/schema.prisma (`model AuditEntry`).
+// ---------------------------------------------------------------------------
+
+/**
+ * Stand-in for a value the log refuses to store verbatim. `secret` replaces a
+ * credential column (never with a length — the length of a hash is a tell);
+ * `blob` replaces a `data:` URI or other inline binary (a diagram image, the
+ * report logo) with its size, so a diff still shows "120 KB → 130 KB";
+ * `oversize` replaces a string longer than AUDIT_VALUE_MAX_CHARS. Written only
+ * by the server's redaction step; a client only renders it.
+ */
+export const auditOpaqueValueSchema = z.object({
+  $opaque: z.enum(['secret', 'blob', 'oversize']),
+  chars: z.number().int().nonnegative().optional(),
+});
+export type AuditOpaqueValue = z.infer<typeof auditOpaqueValueSchema>;
+
+/**
+ * One element of a JSON list column, as the log refers to it: a human label and
+ * a content hash. The log never stores list item bodies (a threat-model diagram
+ * is base64), so "what changed" in a list is answered by comparing refs —
+ * same label + same hash is unchanged, same label + new hash is edited.
+ */
+export const auditListItemRefSchema = z.object({
+  label: z.string().max(255),
+  hash: z.string().max(64),
+});
+export type AuditListItemRef = z.infer<typeof auditListItemRefSchema>;
+
+const auditJsonValue: z.ZodType<unknown> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.array(auditJsonValue),
+    z.record(auditJsonValue),
+  ]),
+);
+
+/**
+ * One item of an entry's `changes`. A discriminated union on `kind`, so every
+ * reader branches on it and never assumes `from`/`to` are present:
+ *
+ *  - `field`   one column before/after. The coalescable kind: `from` is the
+ *              ORIGINAL value of a burst and `to` the final.
+ *  - `list`    a JSON list column as label+hash refs before/after. Coalescable.
+ *  - `order`   a reorder: labels in the old and the new order.
+ *  - `items`   the things a bulk or link action touched, by label.
+ *  - `count`   a tally ("Evidence anonymized: 12").
+ *  - `elided`  a change the log could not keep: its value exceeded
+ *              AUDIT_ENTRY_MAX_BYTES, or the stored row failed to parse on read.
+ *
+ * Validated on the WRITE path as well as the read path: the recorder parses
+ * every change through this before inserting and drops-and-logs one that fails,
+ * because a malformed row in a table whose rows can never be deleted would
+ * otherwise break the list endpoint forever.
+ */
+export const auditChangeSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('field'),
+    field: z.string().min(1).max(256),
+    from: auditJsonValue,
+    to: auditJsonValue,
+  }),
+  z.object({
+    kind: z.literal('list'),
+    field: z.string().min(1).max(256),
+    from: z.array(auditListItemRefSchema),
+    to: z.array(auditListItemRefSchema),
+  }),
+  z.object({
+    kind: z.literal('order'),
+    field: z.string().min(1).max(256),
+    from: z.array(z.string().max(255)),
+    to: z.array(z.string().max(255)),
+  }),
+  z.object({
+    kind: z.literal('items'),
+    label: z.string().min(1).max(255),
+    items: z.array(z.string().max(255)),
+  }),
+  z.object({
+    kind: z.literal('count'),
+    label: z.string().min(1).max(255),
+    count: z.number().int().nonnegative(),
+  }),
+  z.object({ kind: z.literal('elided'), field: z.string().min(1).max(256) }),
+]);
+export type AuditChange = z.infer<typeof auditChangeSchema>;
+export const auditChangesSchema = z.array(auditChangeSchema).max(MAX_AUDIT_CHANGES);
+
+/**
+ * The actor as the client sees it. The SNAPSHOT always renders — `name` and
+ * `email` are what the row recorded at write time, because a user can rename
+ * themselves at will and the log must not relabel history. The live join adds
+ * only `slug` (for a link; null after a hard delete) and `currentName` when it
+ * differs from the snapshot. Null for a `via: 'system'` row.
+ */
+export const auditEntryActorSchema = z.object({
+  name: z.string(),
+  email: z.string(),
+  slug: slugSchema.nullable(),
+  currentName: z.string().nullable(),
+});
+/**
+ * The engagement snapshot. `deleted: true` means the engagement no longer exists
+ * and `slug`/`name` are the write-time snapshots — the slug may since have been
+ * reissued, so the UI never links it. Null for a site-wide entry.
+ */
+export const auditEntryEngagementSchema = z.object({
+  slug: slugSchema,
+  name: z.string(),
+  deleted: z.boolean(),
+});
+
+/**
+ * One row of the audit log as the client sees it. `deleted` is the removal
+ * record: when set, `changes` is empty and `summary`/`entityLabel` are blank,
+ * and the UI renders the tombstone in place. `source` is on the wire so an
+ * imported row can be badged as such.
+ */
+export const auditEntrySchema = z.object({
+  uuid: uuidSchema,
+  engagement: auditEntryEngagementSchema.nullable(),
+  actor: auditEntryActorSchema.nullable(),
+  via: auditViaSchema,
+  action: auditActionSchema,
+  entityType: auditEntityTypeSchema,
+  /** The row's uuid where the model has one, else its id as a string. */
+  entityId: z.string().max(128).nullable(),
+  entityLabel: z.string(),
+  summary: z.string(),
+  changes: auditChangesSchema,
+  /** Saves folded into this entry; 1 when nothing was coalesced. */
+  coalescedCount: z.number().int().positive(),
+  source: auditSourceSchema,
+  /** First save of the burst. */
+  createdAt: isoDateSchema,
+  /** Last save folded in; equals `createdAt` when `coalescedCount` is 1. */
+  lastAt: isoDateSchema,
+  deleted: z
+    .object({
+      at: isoDateSchema,
+      byName: z.string(),
+      byEmail: z.string(),
+      bySlug: slugSchema.nullable(),
+      reason: z.string(),
+    })
+    .nullable(),
+});
+export type AuditEntry = z.infer<typeof auditEntrySchema>;
+
+/** Both audit-log list routes answer with this — the first users of `paginated()`. */
+export const auditLogPageSchema = paginated(auditEntrySchema);
+export type AuditLogPage = z.infer<typeof auditLogPageSchema>;
+
+/**
+ * A list-valued querystring parameter, accepted both as a repeated key
+ * (`action=create&action=update`, which is what the web app writes) and as a
+ * comma-separated value (`action=create,update`, friendlier to a hand-typed
+ * URL). Trimmed, deduplicated, bounded.
+ */
+const queryList = <T extends z.ZodTypeAny>(item: T) =>
+  z
+    .union([z.string(), z.array(z.string())])
+    .transform((raw) => {
+      const parts = (Array.isArray(raw) ? raw : [raw]).flatMap((s) => s.split(','));
+      return [...new Set(parts.map((v) => v.trim()).filter(Boolean))];
+    })
+    .pipe(z.array(item).max(32));
+
+/** A boolean querystring flag: `1`/`true` on, anything else off. */
+const queryFlag = z
+  .union([z.boolean(), z.string()])
+  .transform((v) => v === true || v === '1' || v === 'true');
+
+/**
+ * Filters for both audit-log routes. `page`/`pageSize` are NOT here: the routes
+ * read them with the server's `parsePagination`, as every other list does.
+ * Every key is optional and absent means "no filter"; the web app writes
+ * defaults as absent URL params. `actor` entries are user slugs, numeric ids or
+ * the snapshotted email — all three match, so a deleted user is still
+ * filterable — plus the literal `system` for rows with no human actor. `eng`
+ * (engagement slugs, live or snapshotted) and `noEng` are honoured only by the
+ * site-wide route; the engagement-scoped route ignores them.
+ */
+export const auditListQuerySchema = z.object({
+  q: z.string().trim().max(200).optional(),
+  actor: queryList(z.string().trim().max(320)).optional(),
+  action: queryList(auditActionSchema).optional(),
+  entity: queryList(auditEntityTypeSchema).optional(),
+  via: auditViaSchema.optional(),
+  entityId: z.string().trim().max(128).optional(),
+  from: isoDateSchema.optional(),
+  to: isoDateSchema.optional(),
+  eng: queryList(slugSchema).optional(),
+  noEng: queryFlag.optional(),
+  sort: auditSortKeySchema.default('when'),
+  dir: auditSortDirSchema.default('desc'),
+});
+export type AuditListQuery = z.infer<typeof auditListQuerySchema>;
+export type AuditListQueryInput = z.input<typeof auditListQuerySchema>;
+
+/** One engagement the site-wide facet offers; deleted ones come from the snapshots. */
+export const auditEngagementOptionSchema = z.object({
+  slug: slugSchema,
+  name: z.string(),
+  deleted: z.boolean(),
+});
+export type AuditEngagementOption = z.infer<typeof auditEngagementOptionSchema>;
+
+/**
+ * One actor the facet offers. `value` is what the filter sends back (`slug` when
+ * the account exists, else the snapshotted email, or the literal `system`).
+ */
+export const auditActorOptionSchema = z.object({
+  value: z.string(),
+  label: z.string(),
+  email: z.string().nullable(),
+  deleted: z.boolean(),
+});
+export type AuditActorOption = z.infer<typeof auditActorOptionSchema>;
+
+/**
+ * The option lists both filter bars draw from, plus the day the log started.
+ * `engagements` is present ONLY in the site-wide payload: an engagement writer
+ * must not be able to enumerate every engagement on the server through their
+ * own tab's facets. `logStartsAt` is null on a database the migration never
+ * stamped (a `db push` database), in which case the UI omits the note.
+ */
+export const auditFacetsSchema = z.object({
+  actors: z.array(auditActorOptionSchema),
+  actions: z.array(auditActionSchema),
+  entityTypes: z.array(auditEntityTypeSchema),
+  engagements: z.array(auditEngagementOptionSchema).optional(),
+  logStartsAt: isoDateSchema.nullable(),
+});
+export type AuditFacets = z.infer<typeof auditFacetsSchema>;
+
+/**
+ * `POST /web/admin/audit-log/:uuid/remove` body. The reason is required: it is
+ * the only thing that distinguishes a purge from a cover-up, and it is what the
+ * tombstone shows forever.
+ */
+export const removeAuditEntryInput = z.object({
+  reason: z.string().trim().min(1).max(AUDIT_DELETE_REASON_MAX_CHARS),
+});
+export type RemoveAuditEntryInput = z.infer<typeof removeAuditEntryInput>;
+
+/** The tombstone, as the list will now render it. */
+export const removeAuditEntryResultSchema = z.object({ entry: auditEntrySchema });
+export type RemoveAuditEntryResult = z.infer<typeof removeAuditEntryResultSchema>;
+
+// ---------------------------------------------------------------------------
 // Findings export / import envelope (report.json)
 // ---------------------------------------------------------------------------
 
@@ -1540,11 +1805,27 @@ export type FindingsImportResult = z.infer<typeof findingsImportResult>;
 // ---------------------------------------------------------------------------
 
 /** Bump when the engagement-export shape changes incompatibly; import gates on it. */
-export const ENGAGEMENT_EXPORT_VERSION = 2;
+export const ENGAGEMENT_EXPORT_VERSION = 3;
+
+/**
+ * The version an export is stamped with when nothing in it needs v3 semantics —
+ * i.e. when the file carries no audit entries.
+ *
+ * v3 exists only to stop a backup carrying an audit log from importing
+ * *quietly* into a pre-audit-log server: that server validates
+ * `schemaVersion <= 2` and strips the `auditEntries` collection it has never
+ * heard of, so the import reports success while silently discarding the record
+ * of everything that happened to the engagement. In practice nearly every
+ * export is v3 — creating an engagement writes its first entry — but the rule
+ * is stated by content, not by date, so a pre-feature engagement nobody has
+ * touched (or an export taken with `includeAuditLog=0`) still imports on an
+ * older server. When this does not apply, the finding-tags rule below does.
+ */
+export const ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG = 2;
 
 /**
  * The version an export is stamped with when nothing in it needs v2 semantics —
- * i.e. when no finding carries a tag.
+ * i.e. when no finding carries a tag (and, since v3, no audit entry travels).
  *
  * v2 exists only to stop a backup containing finding tags from importing
  * *quietly* into a pre-finding-tags server: that server validates
@@ -1582,6 +1863,21 @@ export const MAX_ENGAGEMENT_EXPORT_COMMENTS = 50_000;
 export const MAX_ENGAGEMENT_EXPORT_CATEGORIES = 1000;
 export const MAX_ENGAGEMENT_EXPORT_SAVED_QUERIES = 500;
 export const MAX_ENGAGEMENT_EXPORT_GENERATED_REPORTS = 1000;
+
+/**
+ * A TRUNCATION bound, deliberately not a `.max()` like its neighbours. The
+ * caps above make an engagement that outgrows one fail loudly at export time,
+ * which is the right contract for collections an operator can prune. The audit
+ * log is the one collection nobody can prune — the guard trigger refuses
+ * DELETE and removal blanks a row without reclaiming it — so a hard cap here
+ * would make a long-running engagement permanently un-backupable, findings and
+ * evidence included. Instead the export writes the NEWEST this many entries and
+ * records `auditEntriesTotal` beside `auditEntries` in the manifest, so an
+ * oversized log degrades the backup's completeness rather than destroying the
+ * backup. A streamed `audit-log.ndjson` entry is the documented upgrade path if
+ * the whole log ever needs to travel regardless of size.
+ */
+export const MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES = 100_000;
 
 /**
  * A `blobs/` entry name minus its prefix: the lowercase hex sha-256 of the entry's
@@ -1821,6 +2117,44 @@ export const exportedGeneratedReportSchema = z.object({
 export type ExportedGeneratedReport = z.infer<typeof exportedGeneratedReportSchema>;
 
 /**
+ * One audit-log entry in a backup. The actor travels as the snapshot the row
+ * already holds (name + email), so an imported entry reads the same with or
+ * without a matching local account; the importer resolves the FK by email for
+ * the link and never counts a miss as a dropped reference. `entityId` travels
+ * and is remapped for the uuid-bearing models, going null when the file does not
+ * define the row (the ordinary case for an entry about something since
+ * deleted). The engagement snapshot is NOT carried: every restored entry is
+ * attached to the NEW engagement, and the file's own identity lands in the
+ * `import` entry the import route writes. `source` is not carried either —
+ * every restored row is stamped `import`, because this server did not witness
+ * it and the UI badges that.
+ *
+ * Removed entries do not travel at all: a removal is this server's record, not
+ * content, and an export that carried it would only let a hand-edited file
+ * attribute a removal to a local admin who never made one. The importer refuses
+ * any entry that arrives carrying a removal record, for the same reason.
+ *
+ * Every content field has an explicit cap: the importer does not go through the
+ * recorder, so this schema is the only place its caps are enforced on this path.
+ */
+export const exportedAuditEntrySchema = z.object({
+  uuid: uuidSchema,
+  actorName: z.string().max(255).nullable().default(null),
+  actorEmail: exportedUserEmailSchema,
+  via: auditViaSchema,
+  action: auditActionSchema,
+  entityType: auditEntityTypeSchema,
+  entityId: z.string().max(128).nullable().default(null),
+  entityLabel: z.string().max(1024).default(''),
+  summary: z.string().max(2048),
+  changes: auditChangesSchema.default([]),
+  coalescedCount: z.number().int().positive().default(1),
+  createdAt: isoDateSchema,
+  lastAt: isoDateSchema,
+});
+export type ExportedAuditEntry = z.infer<typeof exportedAuditEntrySchema>;
+
+/**
  * The engagement row itself, including every JSON column. Two of those columns
  * hold uuid cross-references into the rest of the file and MUST be remapped on
  * import — `strategicRecommendations[].findingUuids` and
@@ -1891,6 +2225,14 @@ export const engagementExportCountsSchema = z.object({
   findings: z.number().int().nonnegative(),
   savedQueries: z.number().int().nonnegative(),
   generatedReports: z.number().int().nonnegative(),
+  /**
+   * Audit entries WRITTEN to the file, and how many the engagement had. They
+   * differ only when the log outgrew MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES and the
+   * export kept the newest; the importer reports both so the gap is visible.
+   * Defaulted, so a v1/v2 manifest still parses.
+   */
+  auditEntries: z.number().int().nonnegative().default(0),
+  auditEntriesTotal: z.number().int().nonnegative().default(0),
   /** Distinct `blobs/` entries, and their total inflated size. */
   blobs: z.number().int().nonnegative(),
   blobBytes: z.number().int().nonnegative(),
@@ -1946,6 +2288,11 @@ export const engagementExportSchema = z.object({
     .array(exportedGeneratedReportSchema)
     .max(MAX_ENGAGEMENT_EXPORT_GENERATED_REPORTS)
     .default([]),
+  // Absent in v1/v2 files — the default is what keeps them importable. No
+  // `.max()`: the exporter truncates to MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES
+  // itself (see that constant for why this collection must never fail a
+  // backup), and the importer applies the same bound before inserting.
+  auditEntries: z.array(exportedAuditEntrySchema).default([]),
 });
 export type EngagementExport = z.infer<typeof engagementExportSchema>;
 
@@ -1983,6 +2330,9 @@ export const engagementImportCreatedSchema = z.object({
   goalFindingLinks: z.number().int().nonnegative(),
   savedQueries: z.number().int().nonnegative(),
   generatedReports: z.number().int().nonnegative(),
+  /** Audit entries restored (stamped `source: 'import'`), and how many the file said the source had. */
+  auditEntries: z.number().int().nonnegative().default(0),
+  auditEntriesTotal: z.number().int().nonnegative().default(0),
   /** Blob-store objects written, and their total size. */
   blobs: z.number().int().nonnegative(),
   blobBytes: z.number().int().nonnegative(),

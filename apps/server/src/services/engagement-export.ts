@@ -61,6 +61,15 @@
  *    pool as `EvidenceTag` above. Its presence is what bumps the stamp to v2.
  *  - SavedQuery — the engagement's saved timeline/findings queries.
  *  - GeneratedReport — the report history **and** the stored artifact bytes.
+ *  - AuditEntry — the engagement's audit log, as `auditEntries` (export v3). The
+ *    NEWEST `MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES` live entries, written
+ *    oldest-first; the manifest records `auditEntriesTotal` beside the count
+ *    written so a truncated log is visible rather than silent. This is the one
+ *    collection that truncates instead of failing the export, because it is the
+ *    one collection nobody can prune. Removed (tombstoned) entries do not travel:
+ *    a removal is this server's record, not content, and the importer refuses an
+ *    entry that arrives carrying one. `?includeAuditLog=0` omits the collection
+ *    entirely, which also drops the stamp back to the finding-tags rule.
  *
  *    The artifacts are the expensive part of this file (a PDF with screenshots is
  *    megabytes, and history grows one row per generation), so carrying them is a
@@ -121,7 +130,9 @@ import {
   ENGAGEMENT_EXPORT_FORMAT,
   ENGAGEMENT_EXPORT_MANIFEST_ENTRY,
   ENGAGEMENT_EXPORT_VERSION,
+  ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG,
   ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS,
+  MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES,
   engagementExportManifestSchema,
   engagementExportSchema,
   reportConfigSchema,
@@ -271,7 +282,9 @@ export async function buildEngagementExport(
   app: FastifyInstance,
   eng: EngagementRow,
   exportedAt: Date,
+  opts: { includeAuditLog?: boolean } = {},
 ): Promise<EngagementExportStream> {
+  const includeAuditLog = opts.includeAuditLog ?? true;
   const [
     tags,
     targetRows,
@@ -418,14 +431,36 @@ export async function buildEngagementExport(
     };
   });
 
-  // Conditional stamp — see ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS. A
-  // backup whose findings are all untagged has nothing a v1 reader would strip,
-  // so it keeps the older stamp and keeps importing on a pre-finding-tags server.
-  // Stamped once and used for BOTH the records and the manifest: the importer
-  // asserts the version on each, so the two must never disagree.
-  const schemaVersion = findingRows.some((f) => f.tags.length > 0)
-    ? ENGAGEMENT_EXPORT_VERSION
-    : ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS;
+  // The audit log: the newest entries up to the truncation bound, read
+  // newest-first so `take` keeps the right end, then reversed so the file reads
+  // oldest-first like every other collection. Tombstoned entries are excluded —
+  // a removal is this server's record, not content. The total is read beside it
+  // so the manifest can say how much a truncated backup is missing.
+  const [auditRows, auditTotal] = includeAuditLog
+    ? await Promise.all([
+        app.db.auditEntry.findMany({
+          where: { engagementId: eng.id, deletedAt: null },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          take: MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES,
+        }),
+        app.db.auditEntry.count({ where: { engagementId: eng.id, deletedAt: null } }),
+      ])
+    : [[], 0];
+  auditRows.reverse();
+
+  // Conditional, three-tier stamp. Stamped once and used for BOTH the records
+  // and the manifest: the importer asserts the version on each, so the two must
+  // never disagree. A file that carries audit entries needs a v3 reader (a v2
+  // server would strip the collection silently — see
+  // ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG); one that carries none but has a
+  // tagged finding needs v2; and one with neither keeps the v1 stamp and still
+  // imports on a server that predates both features.
+  const schemaVersion =
+    auditRows.length > 0
+      ? ENGAGEMENT_EXPORT_VERSION
+      : findingRows.some((f) => f.tags.length > 0)
+        ? ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG
+        : ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS;
   const data: EngagementExport = engagementExportSchema.parse({
     schemaVersion,
     exportedAt: exportedAt.toISOString(),
@@ -505,6 +540,25 @@ export async function buildEngagementExport(
       filename: r.filename,
       contentType: r.contentType,
     })),
+    // The actor travels as the row's own snapshot; the engagement snapshot does
+    // not (an import re-stamps it to the new engagement); `source` does not
+    // either (every restored row is stamped `import`); and `entityId` travels
+    // for the importer to remap where it can.
+    auditEntries: auditRows.map((a) => ({
+      uuid: a.uuid,
+      actorName: a.actorName,
+      actorEmail: a.actorEmail,
+      via: a.via,
+      action: a.action,
+      entityType: a.entityType,
+      entityId: a.entityId,
+      entityLabel: a.entityLabel,
+      summary: a.summary,
+      changes: a.changes,
+      coalescedCount: a.coalescedCount,
+      createdAt: a.createdAt.toISOString(),
+      lastAt: a.lastAt.toISOString(),
+    })),
   });
 
   const manifest: EngagementExportManifest = engagementExportManifestSchema.parse({
@@ -523,6 +577,8 @@ export async function buildEngagementExport(
       findings: data.findings.length,
       savedQueries: data.savedQueries.length,
       generatedReports: data.generatedReports.length,
+      auditEntries: data.auditEntries.length,
+      auditEntriesTotal: auditTotal,
       blobs: blobs.entries.length,
       blobBytes: blobs.totalBytes,
     },

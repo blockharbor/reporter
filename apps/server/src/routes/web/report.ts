@@ -2,6 +2,7 @@ import archiver from 'archiver';
 import type { FastifyInstance } from 'fastify';
 import type { PuppeteerNode } from 'puppeteer';
 import {
+  ATTESTATION_FRAMEWORK_LABELS,
   FINDINGS_EXPORT_VERSION,
   REPORT_PRESET_FILE_LABELS,
   attestationFrameworkSchema,
@@ -20,6 +21,7 @@ import {
   type Severity,
 } from '@reporter/shared';
 import { HttpError, requireAuth, requireEngagementRole } from '../../auth/guards.js';
+import { auditCtx, recordAudit, type AuditCtx } from '../../services/audit.js';
 import {
   buildFindingsExport,
   buildReportHtml,
@@ -70,6 +72,8 @@ async function recordReport(
     options: ReportOptions;
     userId: number;
     artifact: { buffer: Buffer; contentType: string; filename: string };
+    /** The request's audit context: the `report_generated` entry is written with the history row. */
+    audit: AuditCtx;
   },
 ): Promise<void> {
   try {
@@ -77,6 +81,37 @@ async function recordReport(
   } catch (err) {
     app.log.error({ err }, 'failed to record report history');
   }
+}
+
+/**
+ * The legacy `/findings/report.{pdf,zip}` routes render straight to the caller
+ * and are not in report history (nothing is stored), so the audit log is the
+ * only record that a deliverable was produced. Recorded as `report_generated`
+ * against the `generated_report` entity type with no row to point at, so the
+ * Reports facet still finds them, with the two query flags that decide what
+ * the document holds. Best-effort like every out-of-transaction entry.
+ */
+async function recordLegacyReport(
+  ctx: AuditCtx,
+  format: 'PDF' | 'ZIP',
+  options: ReportOptions,
+  pdfBytes: number,
+  supportingFiles?: number,
+): Promise<void> {
+  await recordAudit(ctx, {
+    action: 'report_generated',
+    entityType: 'generated_report',
+    entity: { id: null, label: `Legacy ${format} report` },
+    summary: `Generated a ${format} report (legacy options)`,
+    changes: [
+      { kind: 'field', field: 'includeAll', from: null, to: options.includeAll ?? false },
+      { kind: 'field', field: 'includeTimeline', from: null, to: options.includeTimeline ?? false },
+      { kind: 'count', label: 'Bytes', count: pdfBytes },
+      ...(supportingFiles === undefined
+        ? []
+        : [{ kind: 'count' as const, label: 'Supporting files', count: supportingFiles }]),
+    ],
+  });
 }
 
 function boolParam(v: unknown): boolean {
@@ -302,14 +337,47 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const q = req.query as Record<string, string | undefined>;
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
       const includeExcludedEvidence = boolParam(q.includeExcludedEvidence);
+      const includeAll = boolParam(q.includeAll);
+      // The exclusion opt-in implies content: it is justified only by making the
+      // file restorable, and without the bytes an import hits the
+      // reference-only `evidenceSkipped` branch for exactly those items — the
+      // sensitive half of the trade without the backup half.
+      const includeEvidenceContent = boolParam(q.includeEvidenceContent) || includeExcludedEvidence;
       const data = await buildFindingsExport(app, eng, new Date(), {
-        includeAll: boolParam(q.includeAll),
-        // The exclusion opt-in implies content: it is justified only by making the
-        // file restorable, and without the bytes an import hits the
-        // reference-only `evidenceSkipped` branch for exactly those items — the
-        // sensitive half of the trade without the backup half.
-        includeEvidenceContent: boolParam(q.includeEvidenceContent) || includeExcludedEvidence,
+        includeAll,
+        includeEvidenceContent,
         includeExcludedEvidence,
+      });
+      // A read the backstop cannot see: nothing is written, but a findings file —
+      // possibly carrying report-excluded evidence and its content — left the
+      // server, and the log says so with the three options that decide what it
+      // held. Written only once the export has been built, so a failed build
+      // leaves no claim of an export that never happened.
+      await recordAudit(auditCtx(req, eng), {
+        action: 'export',
+        entityType: 'engagement',
+        entity: { id: String(eng.id), label: eng.name },
+        summary:
+          'Exported findings as JSON' +
+          (includeAll ? ', including findings not ready to report' : '') +
+          (includeExcludedEvidence ? ', including report-excluded evidence' : '') +
+          (includeEvidenceContent ? ', with evidence content' : ''),
+        changes: [
+          { kind: 'field', field: 'includeAll', from: null, to: includeAll },
+          {
+            kind: 'field',
+            field: 'includeEvidenceContent',
+            from: null,
+            to: includeEvidenceContent,
+          },
+          {
+            kind: 'field',
+            field: 'includeExcludedEvidence',
+            from: null,
+            to: includeExcludedEvidence,
+          },
+          { kind: 'count', label: 'Findings exported', count: data.findings.length },
+        ],
       });
       reply.header(
         'Content-Disposition',
@@ -334,7 +402,15 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
         throw new HttpError(400, `Unsupported export schema version ${data.schemaVersion}`);
       }
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
-      return importFindings(app, { id: eng.id, slug: eng.slug }, data, req.authedUser!.id);
+      // The importer records the one `import` entry itself, inside its own
+      // importer scope, so the per-row writes are not logged individually.
+      return importFindings(
+        app,
+        { id: eng.id, slug: eng.slug, name: eng.name },
+        data,
+        req.authedUser!.id,
+        auditCtx(req, eng),
+      );
     },
   );
 
@@ -346,14 +422,10 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const { slug } = req.params as { slug: string };
       const q = req.query as Record<string, string | undefined>;
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
-      const html = await buildReportHtml(
-        app,
-        eng,
-        new Date(),
-        reportOptionsFromQuery(q),
-        req.authedUser!.id,
-      );
+      const options = reportOptionsFromQuery(q);
+      const html = await buildReportHtml(app, eng, new Date(), options, req.authedUser!.id);
       const pdf = await renderPdf(app, html);
+      await recordLegacyReport(auditCtx(req, eng), 'PDF', options, pdf.length);
       reply
         .header('Content-Type', 'application/pdf')
         .header('Content-Disposition', `attachment; filename="${slug}-findings-${stamp()}.pdf"`);
@@ -376,15 +448,13 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       // Compute the supporting-file set once (names + hashes) and reuse it for
       // both the report's Files Attached table and the ZIP entries.
       const files = await gatherSupportingFiles(app, eng);
-      const html = await buildReportHtml(
-        app,
-        eng,
-        new Date(),
-        reportOptionsFromQuery(q),
-        req.authedUser!.id,
-        files,
-      );
+      const options = reportOptionsFromQuery(q);
+      const html = await buildReportHtml(app, eng, new Date(), options, req.authedUser!.id, files);
       const pdf = await renderPdf(app, html);
+      // Recorded before the archive starts streaming: once `reply.send(archive)`
+      // runs the response is on its way and nothing may be awaited after it that
+      // the request's audit store has to outlive.
+      await recordLegacyReport(auditCtx(req, eng), 'ZIP', options, pdf.length, files.length);
 
       const base = `${slug}-report-${stamp()}`;
       const archive = archiver('zip', { zlib: { level: 9 } });
@@ -439,6 +509,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
         options,
         userId: req.authedUser!.id,
         artifact: { buffer: pdf, contentType: 'application/pdf', filename },
+        audit: auditCtx(req, eng),
       });
       reply
         .header('Content-Type', 'application/pdf')
@@ -491,6 +562,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
         options,
         userId: req.authedUser!.id,
         artifact: { buffer: zip, contentType: 'application/zip', filename },
+        audit: auditCtx(req, eng),
       });
       reply
         .header('Content-Type', 'application/zip')
@@ -531,6 +603,7 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
         options,
         userId: req.authedUser!.id,
         artifact: { buffer, contentType: 'application/json', filename },
+        audit: auditCtx(req, eng),
       });
       reply
         .header('Content-Type', 'application/json')
@@ -613,6 +686,19 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
         throw new HttpError(404, 'Report not found');
       }
       const stream = await app.blobs.get(row.blobKey);
+      // A deliverable left the server: recorded once the bytes are known to be
+      // there, before the response starts, and never folded — each re-download
+      // of a stored report is a discrete hand-over worth its own line.
+      await recordAudit(auditCtx(req, eng), {
+        action: 'download',
+        entityType: 'generated_report',
+        entity: { id: row.uuid, label: `${row.label} ${row.version}` },
+        summary: `Downloaded report ${row.version} (${row.format.toUpperCase()}) — ${row.label}`,
+        changes: [
+          { kind: 'field', field: 'format', from: null, to: row.format },
+          { kind: 'count', label: 'Bytes', count: row.sizeBytes ?? 0 },
+        ],
+      });
       reply
         .header('Content-Type', row.contentType ?? 'application/octet-stream')
         .header(
@@ -656,6 +742,21 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
         overallRisk: severityParam(q.overallRisk),
       });
       const pdf = await renderPdf(app, html);
+      // The letter is not a history row of its own (it attests to one), so the
+      // log is its only record. The framework and the exclusions choice are what
+      // decide the letter's content; the signatory and recipient names typed into
+      // the form are people's names, not engagement content, and are not stored.
+      await recordAudit(auditCtx(req, eng), {
+        action: 'report_generated',
+        entityType: 'generated_report',
+        entity: { id: report.uuid, label: `${report.label} ${report.version}` },
+        summary: `Generated an attestation letter (${ATTESTATION_FRAMEWORK_LABELS[framework]}) for report ${report.version}`,
+        changes: [
+          { kind: 'field', field: 'framework', from: null, to: framework },
+          { kind: 'field', field: 'showExclusions', from: null, to: boolParam(q.showExclusions) },
+          { kind: 'count', label: 'Bytes', count: pdf.length },
+        ],
+      });
       reply
         .header('Content-Type', 'application/pdf')
         .header(

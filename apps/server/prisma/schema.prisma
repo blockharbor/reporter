@@ -111,6 +111,10 @@ model User {
   // outlives the hard delete of its author (consistent with the anonymizing user
   // delete: the artifact survives, the byline becomes "Deleted user").
   reportTemplates  ReportTemplate[]
+  // Audit entries this user performed, and entries this user removed. Both
+  // SetNull on the far side: the log outlives the hard delete of anyone in it.
+  auditEntries     AuditEntry[]         @relation("AuditActor")
+  auditRemovals    AuditEntry[]         @relation("AuditDeleter")
 
   @@map("users")
 }
@@ -255,6 +259,8 @@ model Engagement {
   savedQueries     SavedQuery[]
   targets          EngagementTarget[]
   generatedReports GeneratedReport[]
+  // SetNull, not Cascade: the log survives the engagement (see `model AuditEntry`).
+  auditEntries     AuditEntry[]
 
   @@map("engagements")
 }
@@ -529,6 +535,137 @@ model GeneratedReport {
 
   @@index([engagementId, createdAt])
   @@map("generated_reports")
+}
+
+/// The audit log: one row per recorded event — every create/update/delete of
+/// engagement content and admin records, sign-in events, and the reads that hand
+/// data out (report generation, downloads, engagement export/import). Written two
+/// ways: automatically by the Prisma client extension (`src/audit/extension.ts`,
+/// the backstop that no write escapes) and by hand in handlers whose row-level
+/// truth is misleading (the engagement PUT, reorders, bulk deletes, tag
+/// merge/unapply, and every read event, which the backstop cannot see). `source`
+/// says which: 'backstop', 'intent', or 'import' for a row restored from an
+/// engagement archive — which the UI badges, because a file can say anything.
+///
+/// Append-only, forever. There is no pruning route and no retention window: the
+/// log is the record of what happened to a client deliverable, and its value is
+/// highest exactly when it is old. The `audit_entries_guard` trigger (migration
+/// 20261010120000_audit_log) makes that a database rule rather than a service
+/// convention: DELETE is refused outright, and a live row may change in exactly
+/// three ways — the coalescing fold (`changes`, `coalescedCount`, `lastAt`), the
+/// one-way removal transition, and a foreign key going to NULL when its target
+/// is deleted. Anything else is refused, so `summary`, `actorName`, `action`,
+/// `createdAt` and the rest cannot be rewritten through `updateMany` or raw SQL
+/// without a trace. That guarantee holds against the APPLICATION — its database
+/// role could still `DROP TRIGGER` — not against a database superuser.
+///
+/// Removal is the one write an admin can make: it blanks the row's content
+/// (`changes`, `summary`, `entityLabel`) and stamps who removed it, when and why
+/// into `deletedAt` / `deletedBy*` / `deletedReason`. The row itself stays, so
+/// the log shows "an entry was removed here by X"; once removed it is frozen by
+/// the same trigger, so the removal record can never itself be removed or
+/// re-worded. Removal exists to purge a secret or PII that landed in a diff, not
+/// to tidy history — which is why the skeleton (actor, action, entity, time)
+/// survives it. Because `entityId` survives too, it is a load-bearing invariant
+/// that it only ever holds a non-secret machine identifier (a uuid or a row id —
+/// never an API access key); `services/audit.ts` states and tests that.
+///
+/// Snapshots over joins. `actorName`/`actorEmail` and
+/// `engagementSlug`/`engagementName` are copied at write time: the actor FK and
+/// the engagement FK are both nullable SET NULL, so an entry outlives a hard user
+/// delete and an engagement delete, and the admin log still reads "Ada Admin
+/// deleted engagement acme-2026". The snapshot is also what RENDERS, always — a
+/// user can rename themselves at will, and the log must not relabel history. A
+/// null `actorName` + `actorEmail` means there was no human actor (`via =
+/// 'system'`: bootstrap, seed, import), never "unknown".
+///
+/// Autosave bursts coalesce, per FIELD. `useAutosave` fires a PUT ~800 ms after
+/// typing pauses, so a paragraph typed into the executive summary is a dozen
+/// saves. A later save by the same actor of the same field of the same entity
+/// (`coalesceKey`) within AUDIT_COALESCE_WINDOW_MS of the previous fold updates
+/// the existing row in place: `changes[0].from` keeps the ORIGINAL value,
+/// `changes[0].to` takes the new one, `lastAt` advances and `coalescedCount`
+/// counts the saves. `createdAt` is therefore the first save of the burst. A
+/// removed row never folds (it is frozen), and a different actor in between
+/// breaks the chain. `lastAt` is deliberately in NO index: the fold writes it on
+/// the hottest path in the app, and keeping it out of every index keeps the fold
+/// a HOT update.
+///
+/// `via` / `action` / `entityType` / `source` are plain TEXT closed by zod enums
+/// in @reporter/shared and re-parsed on read, as `GeneratedReport.preset` and
+/// `Evidence.contentType` are — a new entity type or action needs no migration.
+///
+/// Indexes, each for one read: `(engagementId, createdAt)` the engagement tab's
+/// default sort; `(createdAt)` the admin page's; `(actorId, createdAt)` the actor
+/// facet; `(action, createdAt desc)` and `(actorName, createdAt desc)` the two
+/// non-default sorts; `(entityType, entityId, createdAt)` "history of this row";
+/// `(actorId, entityType, entityId, coalesceKey, createdAt desc)` the fold's
+/// single-candidate lookup; `(engagementSlug)` the deleted-engagement facet;
+/// `(deletedById)` because Prisma creates no index for an FK scalar on Postgres
+/// and without it `ON DELETE SET NULL` would scan the whole table on every user
+/// delete.
+///
+/// Travels in the engagement export as `auditEntries` (newest 100,000; the one
+/// collection that truncates rather than failing the export, because it is the
+/// one collection nobody can prune), restored with `source = 'import'`.
+model AuditEntry {
+  id             Int       @id @default(autoincrement())
+  uuid           String    @unique @default(uuid())
+  // Null for site-wide events (user admin, sign-ins, default tags, branding,
+  // templates) and after the engagement is hard-deleted; the two snapshots keep
+  // the entry readable in the admin log either way.
+  engagementId   Int?      @map("engagement_id")
+  engagementSlug String?   @map("engagement_slug")
+  engagementName String?   @map("engagement_name")
+  // Who did it. Null FK after a hard user delete; null snapshots only for
+  // `via = 'system'`.
+  actorId        Int?      @map("actor_id")
+  actorName      String?   @map("actor_name")
+  actorEmail     String?   @map("actor_email")
+  // AUDIT_VIAS: 'session' | 'apikey' | 'system'.
+  via            String
+  // AUDIT_ACTIONS.
+  action         String
+  // AUDIT_ENTITY_TYPES.
+  entityType     String    @map("entity_type")
+  // The row's uuid where the model has one, else its id as a string. Null only
+  // on an imported entry whose target the archive did not carry. NEVER a secret
+  // or a credential identifier — see the model comment.
+  entityId       String?   @map("entity_id")
+  // Title/name at write time, so a deleted row still has a human handle.
+  entityLabel    String    @default("") @map("entity_label")
+  // One human sentence, e.g. "Wendy Writer edited finding “Weak TLS”: Impact".
+  summary        String
+  // `auditChangeSchema[]` — a one-element array on a coalescable update.
+  changes        Json      @default("[]")
+  // The field a coalescable entry is about; null for everything that never folds.
+  coalesceKey    String?   @map("coalesce_key")
+  coalescedCount Int       @default(1) @map("coalesced_count")
+  // AUDIT_SOURCES: 'backstop' | 'intent' | 'import'.
+  source         String    @default("intent")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  lastAt         DateTime  @default(now()) @map("last_at")
+  // Removal record — see the model comment. Set once, never changed.
+  deletedAt      DateTime? @map("deleted_at")
+  deletedById    Int?      @map("deleted_by_id")
+  deletedByName  String?   @map("deleted_by_name")
+  deletedByEmail String?   @map("deleted_by_email")
+  deletedReason  String?   @map("deleted_reason")
+
+  engagement Engagement? @relation(fields: [engagementId], references: [id], onDelete: SetNull)
+  actor      User?       @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  deletedBy  User?       @relation("AuditDeleter", fields: [deletedById], references: [id], onDelete: SetNull)
+
+  @@index([engagementId, createdAt])
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt(sort: Desc)])
+  @@index([actorName, createdAt(sort: Desc)])
+  @@index([entityType, entityId, createdAt])
+  @@index([actorId, entityType, entityId, coalesceKey, createdAt(sort: Desc)])
+  @@index([engagementSlug])
+  @@index([deletedById])
+  @@map("audit_entries")
 }
 
 model Evidence {

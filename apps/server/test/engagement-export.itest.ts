@@ -8,13 +8,22 @@ import {
   ENGAGEMENT_EXPORT_FORMAT,
   ENGAGEMENT_EXPORT_MANIFEST_ENTRY,
   ENGAGEMENT_EXPORT_VERSION,
+  ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG,
   ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS,
+  MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES,
   engagementExportManifestSchema,
   engagementExportSchema,
   type EngagementExport,
   type EngagementExportManifest,
 } from '@reporter/shared';
-import { WEB_HEADERS, buildTestApp, loginCookie, seedUsers, truncateAll } from './helpers.js';
+import {
+  WEB_HEADERS,
+  buildTestApp,
+  loginCookie,
+  seedUsers,
+  truncateAll,
+  truncateAuditLog,
+} from './helpers.js';
 
 let app: FastifyInstance;
 
@@ -245,14 +254,18 @@ async function seedEngagement() {
     },
   });
 
+  // The backstop recorded every fixture write above as an audit entry, and an
+  // export carries the log — so each case starts from an empty log and seeds
+  // exactly the entries it means to assert on.
+  await truncateAuditLog(app);
   return { users, eng, tag, parent, child, excluded, comment, finding, strength, goal, target };
 }
 
 /** Download the export and decode it. */
-async function fetchExport(cookie: string) {
+async function fetchExport(cookie: string, query = '') {
   const res = await app.inject({
     method: 'GET',
-    url: '/web/engagements/op1/export.zip',
+    url: `/web/engagements/op1/export.zip${query}`,
     headers: { ...WEB_HEADERS, cookie },
   });
   expect(res.statusCode).toBe(200);
@@ -504,20 +517,222 @@ describe('schema version stamp', () => {
     expect(data.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS);
   });
 
-  it('stamps the current version in both places once a single finding is tagged', async () => {
+  it('stamps the finding-tags version in both places once a single finding is tagged', async () => {
     const seeded = await seedEngagement();
     await app.db.findingTag.create({
       data: { findingId: seeded.finding.id, tagId: seeded.tag.id },
     });
+    await truncateAuditLog(app);
     const cookie = await loginCookie(app, 'writer@test.local', 'password123');
     const { manifest, data } = await fetchExport(cookie);
 
-    expect(manifest.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION);
-    expect(data.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION);
+    // v2, not v3: a tagged finding needs the finding-tags reader, and with no
+    // audit entry in the file nothing needs the v3 one.
+    expect(manifest.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG);
+    expect(data.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG);
     expect(manifest.schemaVersion).not.toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_FINDING_TAGS);
     // And the field the bump exists to protect is actually in the records.
     const finding = data.findings.find((f) => f.uuid === seeded.finding.uuid)!;
     expect(finding.tagNames).toEqual(['can']);
     expect(data.findings.find((f) => f.uuid === seeded.strength.uuid)!.tagNames).toEqual([]);
   });
+});
+
+/**
+ * The audit log is the one collection that is content on one server and a
+ * record on this one: live entries travel, removed ones do not, the export is
+ * itself an entry, and an oversized log truncates rather than failing.
+ */
+describe('the audit log in the export', () => {
+  const EXPORTED_ENTRY_KEYS = [
+    'action',
+    'actorEmail',
+    'actorName',
+    'changes',
+    'coalescedCount',
+    'createdAt',
+    'entityId',
+    'entityLabel',
+    'entityType',
+    'lastAt',
+    'summary',
+    'uuid',
+    'via',
+  ];
+
+  function liveRow(
+    eng: { id: number; slug: string; name: string },
+    actor: { id: number; email: string },
+    createdAt: string,
+    summary: string,
+  ) {
+    return {
+      engagementId: eng.id,
+      engagementSlug: eng.slug,
+      engagementName: eng.name,
+      actorId: actor.id,
+      actorName: 'Wendy Writer',
+      actorEmail: actor.email,
+      via: 'session',
+      action: 'update',
+      entityType: 'evidence',
+      entityId: 'e0a1b2c3-0000-4000-8000-000000000001',
+      entityLabel: 'Screenshot',
+      summary,
+      changes: [{ kind: 'field', field: 'description', from: 'a', to: 'b' }],
+      coalesceKey: 'description',
+      coalescedCount: 2,
+      source: 'intent',
+      createdAt: new Date(createdAt),
+      lastAt: new Date(createdAt),
+    };
+  }
+
+  it('carries live entries oldest-first, stamps v3, and records the export itself', async () => {
+    const { eng, users } = await seedEngagement();
+    // Inserted newest-first, so the order in the file is the exporter's doing.
+    const newer = await app.db.auditEntry.create({
+      data: liveRow(eng, users.writer, '2026-02-01T10:00:00Z', 'second'),
+    });
+    const older = await app.db.auditEntry.create({
+      data: liveRow(eng, users.writer, '2026-01-01T10:00:00Z', 'first'),
+    });
+    const removed = await app.db.auditEntry.create({
+      data: liveRow(eng, users.writer, '2026-01-15T10:00:00Z', 'gone'),
+    });
+    await app.db.auditEntry.updateMany({
+      where: { id: removed.id },
+      data: {
+        deletedAt: new Date(),
+        deletedById: users.admin.id,
+        deletedByName: 'Ada Admin',
+        deletedByEmail: users.admin.email,
+        deletedReason: 'Pasted a credential.',
+        summary: '',
+        entityLabel: '',
+        changes: [],
+      },
+    });
+    const cookie = await loginCookie(app, 'writer@test.local', 'password123');
+    const { manifest, data } = await fetchExport(cookie);
+
+    // Entries in the file need the v3 reader, whatever the findings carry.
+    expect(data.findings.every((f) => f.tagNames.length === 0)).toBe(true);
+    expect(manifest.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION);
+    expect(data.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION);
+    expect(manifest.counts).toMatchObject({ auditEntries: 2, auditEntriesTotal: 2 });
+
+    expect(data.auditEntries.map((a) => a.summary)).toEqual(['first', 'second']);
+    expect(data.auditEntries.map((a) => a.uuid)).toEqual([older.uuid, newer.uuid]);
+    expect(data.auditEntries[0]).toEqual({
+      uuid: older.uuid,
+      actorName: 'Wendy Writer',
+      actorEmail: 'writer@test.local',
+      via: 'session',
+      action: 'update',
+      entityType: 'evidence',
+      entityId: 'e0a1b2c3-0000-4000-8000-000000000001',
+      entityLabel: 'Screenshot',
+      summary: 'first',
+      changes: [{ kind: 'field', field: 'description', from: 'a', to: 'b' }],
+      coalescedCount: 2,
+      createdAt: '2026-01-01T10:00:00.000Z',
+      lastAt: '2026-01-01T10:00:00.000Z',
+    });
+    // Exactly these keys: no engagement snapshot (re-stamped on import), no
+    // `source` (every restored row is `import`), nothing of a removal.
+    expect(Object.keys(data.auditEntries[0]!).sort()).toEqual(EXPORTED_ENTRY_KEYS);
+
+    // The download is an event: recorded after the archive was finalized, by
+    // the writer, on this engagement, with the manifest's counts — and
+    // therefore not inside the archive it describes.
+    const own = await app.db.auditEntry.findMany({ where: { action: 'export' } });
+    expect(own).toHaveLength(1);
+    expect(own[0]).toMatchObject({
+      entityType: 'engagement',
+      entityId: String(eng.id),
+      engagementId: eng.id,
+      engagementSlug: 'op1',
+      actorEmail: 'writer@test.local',
+      via: 'session',
+    });
+    expect(own[0]!.summary).toContain('2 of 2 audit entries');
+    expect(own[0]!.changes).toEqual(
+      expect.arrayContaining([
+        { kind: 'count', label: 'Audit entries written', count: 2 },
+        { kind: 'count', label: 'Audit entries total', count: 2 },
+        { kind: 'count', label: 'Findings', count: 2 },
+      ]),
+    );
+    expect(data.auditEntries.map((a) => a.uuid)).not.toContain(own[0]!.uuid);
+  });
+
+  it('leaves the log out on ?includeAuditLog=0, and the stamp falls back', async () => {
+    const seeded = await seedEngagement();
+    await app.db.findingTag.create({
+      data: { findingId: seeded.finding.id, tagId: seeded.tag.id },
+    });
+    await truncateAuditLog(app);
+    await app.db.auditEntry.create({
+      data: liveRow(seeded.eng, seeded.users.writer, '2026-01-01T10:00:00Z', 'first'),
+    });
+    const cookie = await loginCookie(app, 'writer@test.local', 'password123');
+    const { manifest, data } = await fetchExport(cookie, '?includeAuditLog=0');
+
+    expect(data.auditEntries).toEqual([]);
+    expect(manifest.counts).toMatchObject({ auditEntries: 0, auditEntriesTotal: 0 });
+    // The tagged finding still needs v2; nothing needs v3.
+    expect(manifest.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG);
+    expect(data.schemaVersion).toBe(ENGAGEMENT_EXPORT_VERSION_WITHOUT_AUDIT_LOG);
+    // The export is still recorded, and says the log was left out.
+    const own = await app.db.auditEntry.findFirstOrThrow({ where: { action: 'export' } });
+    expect(own.summary).toContain('audit log left out');
+  });
+
+  it('keeps the newest entries when the log outgrows the bound, and says how many it lacks', async () => {
+    const { eng, users } = await seedEngagement();
+    const total = MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES + 1;
+    // Row n is n seconds into 2026: the highest n is the newest, and row 1 —
+    // the oldest — is the one that must not make it into the file.
+    await app.db.$executeRaw`
+        INSERT INTO "audit_entries"
+          (uuid, engagement_id, engagement_slug, engagement_name, actor_id, actor_name,
+           actor_email, via, action, entity_type, entity_label, summary, changes,
+           coalesced_count, source, created_at, last_at)
+        SELECT gen_random_uuid()::text, ${eng.id}, 'op1', 'Op One', ${users.writer.id},
+               'Wendy Writer', 'writer@test.local', 'session', 'update', 'evidence', 'bulk',
+               'row ' || n, '[]'::jsonb, 1, 'intent', ts, ts
+          FROM (SELECT n, timestamp '2026-01-01 00:00:00' + (n * interval '1 second') AS ts
+                  FROM generate_series(1, ${total}) AS n) AS rows`;
+    expect(await app.db.auditEntry.count()).toBe(total);
+
+    const cookie = await loginCookie(app, 'writer@test.local', 'password123');
+    const res = await app.inject({
+      method: 'GET',
+      url: '/web/engagements/op1/export.zip',
+      headers: { ...WEB_HEADERS, cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const zip = await readZip(res.rawPayload);
+    const manifest = engagementExportManifestSchema.parse(
+      JSON.parse(zip.files.get(ENGAGEMENT_EXPORT_MANIFEST_ENTRY)!.toString('utf8')),
+    );
+    // Not zod-parsed: a hundred thousand entries through the schema is the
+    // importer's job, and the assertions here are about which rows travelled.
+    const data = JSON.parse(zip.files.get(ENGAGEMENT_EXPORT_DATA_ENTRY)!.toString('utf8')) as {
+      auditEntries: { summary: string }[];
+    };
+    expect(manifest.counts).toMatchObject({
+      auditEntries: MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES,
+      auditEntriesTotal: total,
+    });
+    expect(data.auditEntries).toHaveLength(MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES);
+    expect(data.auditEntries[0]!.summary).toBe('row 2');
+    expect(data.auditEntries[data.auditEntries.length - 1]!.summary).toBe(`row ${total}`);
+    // The export entry reports the gap too.
+    const own = await app.db.auditEntry.findFirstOrThrow({ where: { action: 'export' } });
+    expect(own.summary).toContain(
+      `${MAX_ENGAGEMENT_EXPORT_AUDIT_ENTRIES} of ${total} audit entries`,
+    );
+  }, 180_000);
 });

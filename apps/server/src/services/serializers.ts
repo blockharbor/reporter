@@ -1,5 +1,6 @@
 import type {
   ApiKey as DbApiKey,
+  AuditEntry as DbAuditEntry,
   Evidence as DbEvidence,
   EvidenceComment as DbEvidenceComment,
   EvidenceFinding as DbEvidenceFinding,
@@ -14,10 +15,14 @@ import type {
 } from '@prisma/client';
 import { EVIDENCE_TAG_ORDER_BY } from './tags.js';
 import {
+  MAX_AUDIT_CHANGES,
+  auditChangeSchema,
   recommendationItemSchema,
   reportConfigSchema,
   reportTemplateConfigSchema,
   type ApiKey,
+  type AuditChange,
+  type AuditEntry,
   type Evidence,
   type EvidenceComment,
   type EngagementProgress,
@@ -400,4 +405,99 @@ export function evidenceInclude(userId: number) {
     _count: { select: { comments: true, goals: true } },
     userPrefs: { where: { userId }, select: { isFavorite: true } },
   } as const;
+}
+
+/**
+ * An audit row with the two live joins the wire shape needs: the actor (slug
+ * for a link, name for the "now called" hint) and the remover's slug. Both
+ * nullable, because both FKs are `SetNull` on a hard user delete.
+ */
+export type AuditEntryRow = DbAuditEntry & {
+  actor: Pick<DbUser, 'slug' | 'firstName' | 'lastName'> | null;
+  deletedBy: Pick<DbUser, 'slug'> | null;
+};
+
+/**
+ * The stored `changes` column, read defensively. Every change was validated on
+ * the write path, so this normally parses clean; but the rows can never be
+ * deleted, so a row an older build (or a hand edit in psql) left malformed
+ * must degrade to one unreadable line rather than 500 the whole list forever —
+ * `safeParse` per change with an `elided` stand-in, never a throwing `.parse()`
+ * like the template serializer above uses on a column an admin can fix.
+ */
+function readAuditChanges(raw: unknown): AuditChange[] {
+  if (!Array.isArray(raw)) return raw == null ? [] : [{ kind: 'elided', field: 'changes' }];
+  return raw.slice(0, MAX_AUDIT_CHANGES).map((item): AuditChange => {
+    const parsed = auditChangeSchema.safeParse(item);
+    if (parsed.success) return parsed.data;
+    const field =
+      item !== null && typeof item === 'object' && 'field' in item && typeof item.field === 'string'
+        ? item.field
+        : 'changes';
+    return { kind: 'elided', field: field || 'changes' };
+  });
+}
+
+/**
+ * One audit entry on the wire. The SNAPSHOT always renders: `actor.name` and
+ * `actor.email` are what the row recorded at write time, and the live join
+ * adds only `slug` (a link target; null once the account is hard-deleted) and
+ * `currentName` when the account has since been renamed — never the other way
+ * round, because any user can rename themselves through their profile and the
+ * log must not let them relabel their own history. Same rule for the remover
+ * on a tombstone.
+ *
+ * The engagement is the snapshot too, with `deleted: true` whenever the FK is
+ * null: a freed slug can be reissued to a new engagement (helpers/slug.ts only
+ * checks current existence), so a row whose engagement is gone must never link
+ * to `/engagements/<slug>` — the UI keys the "do not link" decision on
+ * `deleted`, and the slug is kept only as a label and a filter value.
+ */
+export function serializeAuditEntry(e: AuditEntryRow): AuditEntry {
+  const liveName = e.actor ? `${e.actor.firstName} ${e.actor.lastName}`.trim() : null;
+  const removed = e.deletedAt !== null;
+  return {
+    uuid: e.uuid,
+    engagement:
+      e.engagementSlug !== null
+        ? {
+            slug: e.engagementSlug,
+            name: e.engagementName ?? e.engagementSlug,
+            deleted: e.engagementId === null,
+          }
+        : null,
+    // A `via: 'system'` row has no actor at all; a deleted user's row still
+    // has its snapshot and renders with no link.
+    actor:
+      e.actorName !== null || e.actorEmail !== null
+        ? {
+            name: e.actorName ?? e.actorEmail ?? '',
+            email: e.actorEmail ?? '',
+            slug: e.actor?.slug ?? null,
+            currentName: liveName !== null && liveName !== e.actorName ? liveName : null,
+          }
+        : null,
+    via: e.via as AuditEntry['via'],
+    action: e.action as AuditEntry['action'],
+    entityType: e.entityType as AuditEntry['entityType'],
+    entityId: e.entityId,
+    entityLabel: e.entityLabel,
+    summary: e.summary,
+    // A removed row stores `[]`; reading it through the same path keeps the
+    // tombstone's `changes` empty without a special case.
+    changes: removed ? [] : readAuditChanges(e.changes),
+    coalescedCount: e.coalescedCount,
+    source: e.source as AuditEntry['source'],
+    createdAt: e.createdAt.toISOString(),
+    lastAt: e.lastAt.toISOString(),
+    deleted: removed
+      ? {
+          at: e.deletedAt!.toISOString(),
+          byName: e.deletedByName ?? '',
+          byEmail: e.deletedByEmail ?? '',
+          bySlug: e.deletedBy?.slug ?? null,
+          reason: e.deletedReason ?? '',
+        }
+      : null,
+  };
 }

@@ -14,6 +14,7 @@ import { categoryRoutes } from './finding-categories.js';
 import { queryRoutes } from './queries.js';
 import { adminRoutes } from './admin.js';
 import { accountRoutes } from './account.js';
+import { auditRoutes } from './audit.js';
 
 /** Registers the web plane (`/web/*`) — session-cookie auth + CSRF guard. */
 export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
@@ -40,4 +41,5 @@ export async function registerWebRoutes(app: FastifyInstance): Promise<void> {
   await app.register(queryRoutes);
   await app.register(adminRoutes);
   await app.register(accountRoutes);
+  await app.register(auditRoutes);
 }

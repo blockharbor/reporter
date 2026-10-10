@@ -3,9 +3,16 @@ import { isDateWithinSkew, parseAuthorization, verifySignature } from '@reporter
 import { ENGAGEMENT_ROLES, ROLE_RANK, type EngagementRole } from '@reporter/shared';
 import type { User } from '@prisma/client';
 import type { AuthedUser } from '../types.js';
+import { bindAuditActor } from '../audit/context.js';
+import { auditCtx, coalesceOrInsert } from '../services/audit.js';
 import { SESSION_COOKIE, resolveSession } from './session.js';
 
-function toAuthedUser(user: User, via: AuthedUser['via']): AuthedUser {
+/**
+ * The request principal from a user row. Exported for the pre-guard sign-in
+ * handlers (setup, login, recovery), which know their user before any guard
+ * ran and must `bindAuditActor` it themselves so their entries are attributed.
+ */
+export function toAuthedUser(user: User, via: AuthedUser['via']): AuthedUser {
   return {
     id: user.id,
     slug: user.slug,
@@ -34,6 +41,8 @@ export async function requireAuth(req: FastifyRequest, _reply: FastifyReply): Pr
   const user = await resolveSession(req.server.db, token);
   if (!user) throw new HttpError(401, 'Not authenticated');
   req.authedUser = toAuthedUser(user, 'session');
+  // From here every write in this request is attributed to the session user.
+  bindAuditActor(req.authedUser);
 }
 
 /** Client-API-plane auth: verify the HMAC signature or a uniform 401. */
@@ -64,7 +73,29 @@ export async function requireApiAuth(req: FastifyRequest, _reply: FastifyReply):
   if (!ok) throw fail();
 
   req.authedUser = toAuthedUser(apiKey.user, 'apikey');
-  // Best-effort last-auth stamp; don't block the request on it.
+  bindAuditActor(req.authedUser);
+
+  // The one audit entry a guard writes: an API key authenticated, attributed to
+  // the user behind it and to nothing else — no key id, no access key, no IP
+  // (DECISIONS: "No key id, no IP stored"), and `entityId` is the user's slug so
+  // the entry threads with the same user's sign-ins. Awaited, because no audit
+  // write may outlive its request; best-effort, because `coalesceOrInsert` logs
+  // and swallows outside a transaction and a client request must never fail on
+  // the log. Coalesced on the fixed key `auth`, so a capture client polling
+  // every few seconds is one entry with a count, not a row per request.
+  const u = req.authedUser;
+  await coalesceOrInsert(auditCtx(req), {
+    action: 'api_key_auth',
+    entityType: 'user',
+    entity: { id: u.slug, label: `${u.firstName} ${u.lastName}`.trim() || u.email },
+    summary: 'Authenticated with an API key',
+    coalesceKey: 'auth',
+  });
+
+  // Best-effort last-auth stamp; don't block the request on it. Deliberately
+  // fire-and-forget and deliberately unaudited (ApiKey has no model spec): a
+  // write that may complete after the response cannot be attributed with
+  // confidence — see audit/context.ts on the store's lifetime.
   void req.server.db.apiKey
     .update({ where: { id: apiKey.id }, data: { lastAuth: new Date() } })
     .catch(() => {});

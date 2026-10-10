@@ -13,6 +13,7 @@ import { engagementImportInput } from '@reporter/shared';
 import { HttpError, requireAdmin, requireAuth, requireEngagementRole } from '../../auth/guards.js';
 import { stamp } from '../../helpers/filename.js';
 import { parseMultipart } from '../../helpers/multipart.js';
+import { auditCtx, n, q, recordAudit } from '../../services/audit.js';
 import { buildEngagementExport } from '../../services/engagement-export.js';
 import { engagementImportBodyLimit, importEngagement } from '../../services/engagement-import.js';
 
@@ -25,23 +26,59 @@ export async function engagementTransferRoutes(app: FastifyInstance): Promise<vo
    * routes in `report.ts` use — including `GET /findings/export.json`, which with
    * `?includeExcludedEvidence` is the closest existing thing to a backup.
    *
-   * The bar is not about secrecy of the individual pieces: a `read` member can
-   * already fetch every evidence blob, every comment and every stored report
-   * artifact one request at a time, so this route is *aggregation*, not new access
-   * — which is why it stays an engagement role rather than being reserved for site
-   * admins. What it adds is whole-engagement scope: one file that reconstitutes the
-   * engagement elsewhere, including the verbatim `proposalImport` JSON that no read
-   * route exposes. That is the same class of act as the operations already gated on
-   * `admin` here — editing the engagement's settings, managing its membership, and
-   * deleting it — so it is gated the same way.
+   * The bar was first set as *aggregation*: a `read` member can already fetch every
+   * evidence blob, every comment and every stored report artifact one request at a
+   * time, and this route only bundles them. That is no longer the whole story. The
+   * archive now carries the engagement's audit log, which a read member cannot see
+   * at all (the Audit log tab is writers and admins), and which includes the
+   * engagement's membership history and the display name and email of everyone who
+   * ever acted on it. So the `admin` bar is now also about *new access*, and it
+   * stays an engagement role rather than a site-admin one because that is the same
+   * class of act as the operations already gated on `admin` here — editing the
+   * engagement's settings, managing its membership, and deleting it. DESIGN.md's
+   * description of what an export contains says the same.
+   *
+   * `?includeAuditLog=0` leaves the log out, for a hand-off that should not carry
+   * who-did-what; the file then stamps the older version and imports anywhere.
    */
   app.get(
     '/engagements/:slug/export.zip',
     { preHandler: [requireAuth, requireEngagementRole('admin')] },
     async (req, reply) => {
       const { slug } = req.params as { slug: string };
+      const includeAuditLog = (req.query as { includeAuditLog?: string }).includeAuditLog !== '0';
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
-      const { archive, manifest, finalize } = await buildEngagementExport(app, eng, new Date());
+      const { archive, manifest, finalize } = await buildEngagementExport(app, eng, new Date(), {
+        includeAuditLog,
+      });
+
+      // Recorded BEFORE the first byte goes out. The manifest's counts are final
+      // here (the records and the blob inventory were read above; `finalize`
+      // only streams the bytes), the entry cannot be in the file it describes
+      // (the audit rows were read above too), and nothing audit-related runs
+      // after `reply.send`: an entry written while the response drains could
+      // land after the client holds the whole archive, which is a race a reader
+      // of the log would see and a write the request's audit store should not
+      // have to outlive. Best-effort, like every read event; a stream that
+      // fails part-way still leaves an entry saying the download was begun.
+      const c = manifest.counts;
+      await recordAudit(auditCtx(req, { id: eng.id, slug: eng.slug, name: eng.name }), {
+        action: 'export',
+        entityType: 'engagement',
+        entity: { id: String(eng.id), label: eng.name },
+        summary: `Exported engagement ${q(eng.name)} as a backup (${n(c.evidence, 'evidence', 'evidence')}, ${n(c.findings, 'finding')}, ${c.blobBytes} blob bytes${
+          includeAuditLog
+            ? `, ${c.auditEntries} of ${c.auditEntriesTotal} audit entries`
+            : ', audit log left out'
+        })`,
+        changes: [
+          { kind: 'count', label: 'Evidence', count: c.evidence },
+          { kind: 'count', label: 'Findings', count: c.findings },
+          { kind: 'count', label: 'Reports', count: c.generatedReports },
+          { kind: 'count', label: 'Audit entries written', count: c.auditEntries },
+          { kind: 'count', label: 'Audit entries total', count: c.auditEntriesTotal },
+        ],
+      });
 
       reply
         .header('Content-Type', 'application/zip')
@@ -102,6 +139,11 @@ export async function engagementTransferRoutes(app: FastifyInstance): Promise<vo
         ...overrides,
         archive: archive.data,
         userId: req.authedUser!.id,
+        // The import writes its one summary entry inside its own transaction,
+        // attributed to this admin and attached to the NEW engagement; it names
+        // the source slug and the archive's exportedAt, which is the only place
+        // the restored log's provenance survives.
+        audit: auditCtx(req),
       });
     },
   );

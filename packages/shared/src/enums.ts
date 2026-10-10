@@ -805,3 +805,294 @@ export const ATTESTATION_FRAMEWORK_LABELS: Record<AttestationFramework, string> 
   gdpr: 'GDPR',
   custom: 'Other / Custom',
 };
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+/**
+ * How an audit entry's actor reached the server. `session` is the web plane
+ * (session cookie), `apikey` the HMAC client API — attributed to the user behind
+ * the key; no key id is stored — and `system` is no human request at all:
+ * bootstrap, seed, and the importer's own writes. These are the same words
+ * `AuthedUser.via` already uses, so a guard can copy it straight through.
+ */
+export const AUDIT_VIAS = ['session', 'apikey', 'system'] as const;
+export const auditViaSchema = z.enum(AUDIT_VIAS);
+export type AuditVia = z.infer<typeof auditViaSchema>;
+export const AUDIT_VIA_LABELS: Record<AuditVia, string> = {
+  session: 'Web',
+  apikey: 'Client API',
+  system: 'System',
+};
+
+/**
+ * What an audit entry records. Closed: the column is TEXT, this enum is what
+ * closes it, and `auditEntrySchema` re-parses rows on read. The content group
+ * (create … unapply) is what the backstop and the intent entries write about
+ * rows; `link`/`unlink` are the goal↔evidence, goal↔finding and finding↔evidence
+ * attachments, recorded on the owning entity. The sign-in group covers every
+ * handler in the auth, account and admin routes that touches a credential. The
+ * last four are READS — the events the backstop cannot see. Denied attempts
+ * (403, CSRF, rate limit, validation) are deliberately not actions.
+ */
+export const AUDIT_ACTIONS = [
+  'create',
+  'update',
+  'delete',
+  'reorder',
+  'link',
+  'unlink',
+  'merge',
+  'unapply',
+  'sign_in',
+  'sign_out',
+  'sign_in_failed',
+  'password_changed',
+  'totp_reset',
+  'recovery_link_issued',
+  'recovery_code_used',
+  'api_key_auth',
+  'report_generated',
+  'download',
+  'export',
+  'import',
+] as const;
+export const auditActionSchema = z.enum(AUDIT_ACTIONS);
+export type AuditAction = z.infer<typeof auditActionSchema>;
+/** Past-tense phrases: they complete "<actor> …" in a row and name a facet option. */
+export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
+  create: 'Created',
+  update: 'Updated',
+  delete: 'Deleted',
+  reorder: 'Reordered',
+  link: 'Linked',
+  unlink: 'Unlinked',
+  merge: 'Merged',
+  unapply: 'Unapplied',
+  sign_in: 'Signed in',
+  sign_out: 'Signed out',
+  sign_in_failed: 'Sign-in failed',
+  password_changed: 'Changed password',
+  totp_reset: 'Reset TOTP',
+  recovery_link_issued: 'Issued recovery link',
+  recovery_code_used: 'Used recovery link',
+  api_key_auth: 'Authenticated with API key',
+  report_generated: 'Generated report',
+  download: 'Downloaded',
+  export: 'Exported',
+  import: 'Imported',
+};
+
+/**
+ * The things an entry can be about. Join rows are recorded as changes to their
+ * owner rather than as entities of their own — EvidenceTag/FindingTag as the
+ * owner's `tags` field, GoalEvidence/GoalFinding as `link`/`unlink` on the goal —
+ * except `finding_evidence`, whose link row carries content of its own (an
+ * attack-path step's caption and bucket). Credential models (AuthIdentity,
+ * ApiKey's secret, RecoveryCode, WebauthnCredential) are recorded only as sign-in
+ * actions on the `user`. Excluded on purpose: UserEngagementPref /
+ * UserEvidencePref (favorites are not content), Session, EvidenceMetadata (dead
+ * code), and the audit entry itself — a removal is recorded in place on the row,
+ * never as a second entry.
+ */
+export const AUDIT_ENTITY_TYPES = [
+  'engagement',
+  'member',
+  'target',
+  'activity',
+  'goal',
+  'evidence',
+  'evidence_comment',
+  'finding',
+  'finding_category',
+  'finding_evidence',
+  'tag',
+  'saved_query',
+  'generated_report',
+  'report_template',
+  'report_settings',
+  'default_tag',
+  'user',
+  'api_key',
+] as const;
+export const auditEntityTypeSchema = z.enum(AUDIT_ENTITY_TYPES);
+export type AuditEntityType = z.infer<typeof auditEntityTypeSchema>;
+/**
+ * Title Case, pinned to the words the UI already uses. `evidence_comment` is an
+ * "Evidence note", NOT a "Comment": DESIGN.md reserves "Comment" for linked
+ * evidence, which is an Evidence row and records as `evidence`. `report_settings`
+ * is "Report branding", the Admin tab's name for it.
+ */
+export const AUDIT_ENTITY_TYPE_LABELS: Record<AuditEntityType, string> = {
+  engagement: 'Engagement',
+  member: 'Member',
+  target: 'Target',
+  activity: 'Activity',
+  goal: 'Goal',
+  evidence: 'Evidence',
+  evidence_comment: 'Evidence note',
+  finding: 'Finding',
+  finding_category: 'Finding category',
+  finding_evidence: 'Finding evidence',
+  tag: 'Tag',
+  saved_query: 'Saved query',
+  generated_report: 'Report',
+  report_template: 'Report template',
+  report_settings: 'Report branding',
+  default_tag: 'Default tag',
+  user: 'User',
+  api_key: 'API key',
+};
+
+/**
+ * Which writer produced an entry. `backstop` is the Prisma client extension
+ * recording a row-level write it was not told about; `intent` is a hand-written
+ * entry from a handler that knows what the write meant; `import` is a row
+ * restored from an engagement archive — which the UI badges, because a file can
+ * say anything and this server did not witness it.
+ */
+export const AUDIT_SOURCES = ['backstop', 'intent', 'import'] as const;
+export const auditSourceSchema = z.enum(AUDIT_SOURCES);
+export type AuditSource = z.infer<typeof auditSourceSchema>;
+export const AUDIT_SOURCE_LABELS: Record<AuditSource, string> = {
+  backstop: 'Recorded automatically',
+  intent: 'Recorded',
+  import: 'Imported',
+};
+
+/** The sortable columns of both audit-log tables, shared by the URL and the wire. */
+export const AUDIT_SORT_KEYS = ['when', 'who', 'action'] as const;
+export const auditSortKeySchema = z.enum(AUDIT_SORT_KEYS);
+export type AuditSortKey = z.infer<typeof auditSortKeySchema>;
+export const AUDIT_SORT_DIRS = ['asc', 'desc'] as const;
+export const auditSortDirSchema = z.enum(AUDIT_SORT_DIRS);
+export type AuditSortDir = z.infer<typeof auditSortDirSchema>;
+
+/**
+ * Human labels for diffed columns, by entity type, used by the server's summary
+ * sentences and the web diff renderer so both say "Executive summary" rather
+ * than `executiveSummary`. A column with no label here renders by its name.
+ * Report-config leaves are keyed by their dotted path.
+ */
+export const AUDIT_FIELD_LABELS: Partial<Record<AuditEntityType, Record<string, string>>> = {
+  engagement: {
+    name: 'Name',
+    status: 'Status',
+    startedAt: 'Start date',
+    projectedEndAt: 'Projected end date',
+    actualEndAt: 'Actual end date',
+    clientName: 'Client name',
+    assessmentType: 'Assessment type',
+    testApproach: 'Test approach',
+    location: 'Location',
+    scope: 'Scope',
+    executiveSummary: 'Executive summary',
+    methodology: 'Methodology',
+    objectivesNarrative: 'Objectives',
+    threatModelNarrative: 'Threat model narrative',
+    watermarkEnabled: 'Watermark',
+    watermarkText: 'Watermark text',
+    watermarkColor: 'Watermark color',
+    watermarkOpacity: 'Watermark opacity',
+    watermarkLayer: 'Watermark layer',
+    scopeTargets: 'Scope targets',
+    scopeExclusions: 'Scope exclusions',
+    strategicRecommendations: 'Strategic recommendations',
+    threatModelDiagrams: 'Threat model diagrams',
+    executionNarrative: 'Assessment execution',
+    providerContacts: 'Provider contacts',
+    clientContacts: 'Client contacts',
+    softwareTested: 'Software tested',
+    thirdPartySoftware: 'Third-party software',
+    'reportConfig.sections': 'Report sections',
+    'reportConfig.customSections': 'Custom report sections',
+    'reportConfig.findingGroup': 'Report: findings grouping',
+    'reportConfig.evidenceGroup': 'Report: evidence grouping',
+    'reportConfig.includeAllFindings': 'Report: include all findings',
+    'reportConfig.includeEvidenceTimeline': 'Report: evidence timeline',
+    'reportConfig.numberExecutionSubsections': 'Report: numbered execution subsections',
+    'reportConfig.showEvidenceTimestamps': 'Report: evidence timestamps',
+    'reportConfig.showEvidenceOperators': 'Report: evidence operators',
+    'reportConfig.showFindingLinkedGoals': 'Report: linked goals on findings',
+    'reportConfig.showStrengthDetailCards': 'Report: strength detail cards',
+    'reportConfig.readinessNa': 'Report readiness waivers',
+  },
+  finding: {
+    title: 'Title',
+    description: 'Description',
+    kind: 'Kind',
+    affectedTarget: 'Affected target',
+    impact: 'Impact',
+    fixEffort: 'Fix effort',
+    remediation: 'Remediation',
+    readyToReport: 'Ready to report',
+    severity: 'Severity',
+    cvssVector: 'CVSS vector',
+    category: 'Category',
+    iso21434Refs: 'ISO/SAE 21434 references',
+    unr155Refs: 'UN R155 references',
+    tags: 'Tags',
+    position: 'Position',
+  },
+  evidence: {
+    title: 'Title',
+    description: 'Description',
+    occurredAt: 'Occurred at',
+    contentType: 'Type',
+    contentSubtype: 'Language / interpreter',
+    excludeFromReport: 'Excluded from reports',
+    parent: 'Linked under',
+    content: 'Content',
+    tags: 'Tags',
+  },
+  finding_evidence: { caption: 'Caption', inPath: 'Attack path step', position: 'Position' },
+  goal: { title: 'Title', status: 'Status', isRetest: 'Retest', position: 'Position' },
+  activity: { name: 'Name', category: 'Category', position: 'Position' },
+  target: { name: 'Name', description: 'Description', position: 'Position' },
+  user: {
+    admin: 'Site admin',
+    disabled: 'Disabled',
+    firstName: 'First name',
+    lastName: 'Last name',
+    headless: 'Headless',
+  },
+  tag: { name: 'Name', colorName: 'Color', position: 'Position' },
+  member: { role: 'Role' },
+};
+
+/**
+ * A later save by the same actor of the same field of the same entity within
+ * this long of the previous fold collapses into the previous entry (see `model
+ * AuditEntry`). Three minutes: long enough to cover a typing session with the
+ * 800 ms autosave debounce and a pause to think, short enough that two separate
+ * edit sessions stay two entries.
+ */
+export const AUDIT_COALESCE_WINDOW_MS = 3 * 60_000;
+
+/**
+ * Longest string stored verbatim in a change. Matches the largest prose cap
+ * (`executiveSummary` and friends are `max(20_000)`), so validated input never
+ * truncates; over it a value becomes an `{ $opaque: 'oversize' }` marker.
+ */
+export const AUDIT_VALUE_MAX_CHARS = 20_000;
+/** Cap on `changes[]` per entry; a structural diff of a 200-item list stays well under it. */
+export const MAX_AUDIT_CHANGES = 500;
+/** Cap on the serialized `changes` of one entry; over it, values drop to `{ kind: 'elided' }`. */
+export const AUDIT_ENTRY_MAX_BYTES = 65_536;
+/** A removal reason is mandatory and bounded. */
+export const AUDIT_DELETE_REASON_MAX_CHARS = 500;
+/**
+ * Deepest offset either list route will walk. Exact counts stay exact; beyond
+ * this the pager stops offering pages, because `OFFSET 499950` walked twice (the
+ * count runs alongside) is a real cost on a forever-retained table.
+ */
+export const AUDIT_MAX_OFFSET = 50_000;
+/** Rows the backstop records individually for an updateMany/deleteMany before summarizing. */
+export const AUDIT_BULK_ROW_CAP = 25;
+
+export const AUDIT_ENTRY_ALREADY_REMOVED = 'This entry has already been removed';
+/** The engagement facet's option for entries that belong to no engagement. */
+export const NO_ENGAGEMENT_LABEL = 'No engagement';
+/** The Who column for a `via: 'system'` row, which has no actor snapshot. */
+export const SYSTEM_ACTOR_LABEL = 'System';

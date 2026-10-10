@@ -9,6 +9,24 @@ import {
 import { HttpError, requireAuth, requireEngagementRole } from '../../auth/guards.js';
 import { serializeEngagement, serializeUser } from '../../services/serializers.js';
 import { computeEngagementProgress, computeOneEngagementProgress } from '../../services/goals.js';
+import {
+  AUDIT_TX_MAX_WAIT_MS,
+  AUDIT_TX_TIMEOUT_MS,
+  auditCtx,
+  diffEngagement,
+  inTx,
+  n,
+  q,
+  recordAudit,
+  recordUpdate,
+  withIntent,
+  type EngagementAuditRow,
+} from '../../services/audit.js';
+
+/** The display name an audit entry calls a member by, falling back to the email. */
+function memberName(user: { firstName: string; lastName: string; email: string }): string {
+  return `${user.firstName} ${user.lastName}`.trim() || user.email;
+}
 
 export async function engagementRoutes(app: FastifyInstance): Promise<void> {
   // List the engagements the user is a member of — for everyone, site admins
@@ -51,24 +69,40 @@ export async function engagementRoutes(app: FastifyInstance): Promise<void> {
 
     const defaultTags = await app.db.defaultTag.findMany();
 
-    const eng = await app.db.engagement.create({
-      data: {
-        slug: input.slug,
-        name: input.name,
-        // startedAt defaults to now(); a projected end is optional at creation.
-        projectedEndAt: input.projectedEndAt ? new Date(input.projectedEndAt) : undefined,
-        roles: { create: { userId: user.id, role: 'admin' } },
-        // Explicit positions: the seed list's own order becomes the engagement's
-        // initial curated tag order (Settings → Tags), instead of every tag sharing
-        // position 0 and ordering by the `name` tiebreak alone.
-        tags: {
-          create: defaultTags.map((t, i) => ({
-            name: t.name,
-            colorName: t.colorName,
-            position: i,
-          })),
+    // Hand-written rather than left to the backstop: the backstop would snapshot
+    // thirty columns of defaults and describe the nested writes as "Roles
+    // created: 1, Tags created: N", when what happened is that someone opened an
+    // engagement and the site's default tags were copied in. The nested role and
+    // tag rows are part of the one create statement and never reach the backstop
+    // as writes of their own, so `engagement` is the only model to claim.
+    const eng = await withIntent(['engagement'], async () => {
+      const created = await app.db.engagement.create({
+        data: {
+          slug: input.slug,
+          name: input.name,
+          // startedAt defaults to now(); a projected end is optional at creation.
+          projectedEndAt: input.projectedEndAt ? new Date(input.projectedEndAt) : undefined,
+          roles: { create: { userId: user.id, role: 'admin' } },
+          // Explicit positions: the seed list's own order becomes the engagement's
+          // initial curated tag order (Settings → Tags), instead of every tag sharing
+          // position 0 and ordering by the `name` tiebreak alone.
+          tags: {
+            create: defaultTags.map((t, i) => ({
+              name: t.name,
+              colorName: t.colorName,
+              position: i,
+            })),
+          },
         },
-      },
+      });
+      await recordAudit(auditCtx(req, { id: created.id, slug: created.slug, name: created.name }), {
+        action: 'create',
+        entityType: 'engagement',
+        entity: { id: String(created.id), label: created.name },
+        summary: `Created engagement ${q(created.name)} (${created.slug})`,
+        changes: [{ kind: 'count', label: 'Default tags copied', count: defaultTags.length }],
+      });
+      return created;
     });
     return serializeEngagement(eng, {
       role: 'admin',
@@ -168,7 +202,36 @@ export async function engagementRoutes(app: FastifyInstance): Promise<void> {
         data.actualEndAt = body.actualEndAt === null ? null : new Date(body.actualEndAt);
       }
 
-      const eng = await app.db.engagement.update({ where: { slug }, data });
+      // The audit entry: one coalescable entry per changed field, through the
+      // same `diffEngagement` the backstop would use — hand-written here so the
+      // handler that owns the thirty columns is the one that claims them, and so
+      // the threat-model diagrams go through the cheap `refOf` on this path too.
+      //
+      // The save is gated on a PREDICTED diff first. Autosave posts the whole
+      // form 800 ms after typing pauses, so "type a letter, delete it" lands here
+      // as an update that changes nothing; `recordUpdate` writes nothing for an
+      // empty diff (a no-op save is not an event), and a `withIntent` scope that
+      // writes its model and records nothing is exactly the "forgot the entry"
+      // condition the tripwire exists for. So a save the diff says is empty runs
+      // OUTSIDE the scope, where the backstop — the safety net — sees it, diffs
+      // the real before/after and stays silent when only `updatedAt` moved. The
+      // prediction is faithful because `data` holds plain column values (no
+      // Prisma operation objects) and both sides normalize identically.
+      const ctx = auditCtx(req, { id: current.id, slug: current.slug, name: current.name });
+      const predicted = diffEngagement(current, { ...current, ...data } as EngagementAuditRow);
+      const eng =
+        predicted.length === 0
+          ? await app.db.engagement.update({ where: { slug }, data })
+          : await withIntent(['engagement'], async () => {
+              const updated = await app.db.engagement.update({ where: { slug }, data });
+              await recordUpdate(ctx, {
+                entityType: 'engagement',
+                entity: { id: String(current.id), label: current.name },
+                noun: 'engagement',
+                changes: diffEngagement(current, updated),
+              });
+              return updated;
+            });
       const progress = await computeOneEngagementProgress(app, eng.id);
       // Return the full structured content (matching the GET detail route) so a
       // direct consumer of the PUT response sees the fields it just set.
@@ -195,8 +258,38 @@ export async function engagementRoutes(app: FastifyInstance): Promise<void> {
         where: { engagementId: eng.id },
         select: { blobKey: true },
       });
+      const findingCount = await app.db.finding.count({ where: { engagementId: eng.id } });
 
-      await app.db.engagement.delete({ where: { id: eng.id } });
+      // The entry and the delete share one transaction, and the entry is written
+      // FIRST: a destructive flow must not commit without its record, and a
+      // failed insert here fails the delete rather than the other way round. The
+      // delete then SET NULLs `engagement_id` on every audit row of this
+      // engagement — this one included — and each of those updates fires the
+      // guard trigger; a long-lived engagement has tens of thousands, which is
+      // why the limits are the audit ones and not Prisma's 5 s default. The slug
+      // and name snapshots are what keep the entry readable in the admin log.
+      await withIntent(['engagement'], () =>
+        app.db.$transaction(
+          async (tx) => {
+            await recordAudit(
+              inTx(auditCtx(req, { id: eng.id, slug: eng.slug, name: eng.name }), tx),
+              {
+                action: 'delete',
+                entityType: 'engagement',
+                entity: { id: String(eng.id), label: eng.name },
+                summary: `Deleted engagement ${q(eng.name)} (${eng.slug}): ${n(evidence.length, 'evidence', 'evidence')}, ${n(findingCount, 'finding')}, ${n(reports.length, 'report')}`,
+                changes: [
+                  { kind: 'count', label: 'Evidence', count: evidence.length },
+                  { kind: 'count', label: 'Findings', count: findingCount },
+                  { kind: 'count', label: 'Reports', count: reports.length },
+                ],
+              },
+            );
+            await tx.engagement.delete({ where: { id: eng.id } });
+          },
+          { maxWait: AUDIT_TX_MAX_WAIT_MS, timeout: AUDIT_TX_TIMEOUT_MS },
+        ),
+      );
 
       for (const ev of evidence) {
         for (const key of [ev.fullBlobKey, ev.thumbBlobKey]) {
@@ -259,10 +352,34 @@ export async function engagementRoutes(app: FastifyInstance): Promise<void> {
         where: { email: { equals: body.email, mode: 'insensitive' }, deletedAt: null },
       });
       if (!target) throw new HttpError(404, `No user found with the email “${body.email}”`);
-      await app.db.userEngagementRole.upsert({
+      // Membership is recorded by hand because the row-level truth is a role
+      // row's id, which means nothing to a reader: the entry names the person.
+      // Adding and changing are different events (and a role change never
+      // folds — `recordAudit`, not `recordUpdate` — because who could write to
+      // an engagement when is the one thing this log must keep discrete), and a
+      // re-add with the same role is no event at all, so the write is skipped
+      // rather than run and left unrecorded.
+      const prior = await app.db.userEngagementRole.findUnique({
         where: { userId_engagementId: { userId: target.id, engagementId: eng.id } },
-        create: { userId: target.id, engagementId: eng.id, role: body.role },
-        update: { role: body.role },
+      });
+      if (prior?.role === body.role) return { user: serializeUser(target), role: body.role };
+      const name = memberName(target);
+      const ctx = auditCtx(req, { id: eng.id, slug: eng.slug, name: eng.name });
+      await withIntent(['userEngagementRole'], async () => {
+        await app.db.userEngagementRole.upsert({
+          where: { userId_engagementId: { userId: target.id, engagementId: eng.id } },
+          create: { userId: target.id, engagementId: eng.id, role: body.role },
+          update: { role: body.role },
+        });
+        await recordAudit(ctx, {
+          action: prior ? 'update' : 'create',
+          entityType: 'member',
+          entity: { id: String(target.id), label: name },
+          summary: prior
+            ? `Changed ${name}'s role from ${prior.role} to ${body.role}`
+            : `Added ${name} (${target.email}) to the engagement as ${body.role}`,
+          changes: [{ kind: 'field', field: 'role', from: prior?.role ?? null, to: body.role }],
+        });
       });
       return { user: serializeUser(target), role: body.role };
     },
@@ -276,9 +393,25 @@ export async function engagementRoutes(app: FastifyInstance): Promise<void> {
       const eng = await app.db.engagement.findUniqueOrThrow({ where: { slug } });
       const target = await app.db.user.findUnique({ where: { slug: userSlug } });
       if (!target) throw new HttpError(404, 'User not found');
-      await app.db.userEngagementRole
-        .delete({ where: { userId_engagementId: { userId: target.id, engagementId: eng.id } } })
-        .catch(() => {});
+      // Removing someone who is not a member is a no-op, not an error — and not
+      // an entry either. Checked BEFORE the scope: the backstop tallies a write
+      // when it is issued, not when it succeeds, so a delete that throws on a
+      // missing row inside `withIntent` would count as an unrecorded write.
+      const where = { userId_engagementId: { userId: target.id, engagementId: eng.id } };
+      const removed = await app.db.userEngagementRole.findUnique({ where });
+      if (!removed) return { ok: true };
+      const name = memberName(target);
+      const ctx = auditCtx(req, { id: eng.id, slug: eng.slug, name: eng.name });
+      await withIntent(['userEngagementRole'], async () => {
+        await app.db.userEngagementRole.delete({ where });
+        await recordAudit(ctx, {
+          action: 'delete',
+          entityType: 'member',
+          entity: { id: String(target.id), label: name },
+          summary: `Removed ${name} (${target.email}) from the engagement`,
+          changes: [{ kind: 'field', field: 'role', from: removed.role, to: null }],
+        });
+      });
       return { ok: true };
     },
   );

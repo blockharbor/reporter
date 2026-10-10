@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { createEngagementInput, createTagInput, parseQuery } from '@reporter/shared';
 import { HttpError, requireApiAuth, requireEngagementRole } from '../../auth/guards.js';
 import { createEvidence, listEvidence } from '../../services/evidence.js';
+import { auditCtx, q, recordAudit, withIntent } from '../../services/audit.js';
 import { serializeEngagement, serializeTag } from '../../services/serializers.js';
 import { TAG_ORDER_BY, nextTagPosition } from '../../services/tags.js';
 import { parsePagination } from '../../helpers/pagination.js';
@@ -50,22 +51,35 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     const existing = await app.db.engagement.findUnique({ where: { slug: input.slug } });
     if (existing) throw new HttpError(409, 'An engagement with that slug already exists');
     const defaultTags = await app.db.defaultTag.findMany();
-    const eng = await app.db.engagement.create({
-      data: {
-        slug: input.slug,
-        name: input.name,
-        projectedEndAt: input.projectedEndAt ? new Date(input.projectedEndAt) : undefined,
-        roles: { create: { userId: user.id, role: 'admin' } },
-        // Explicit positions, as in the /web create route: the seed list's order
-        // becomes the engagement's initial curated tag order.
-        tags: {
-          create: defaultTags.map((t, i) => ({
-            name: t.name,
-            colorName: t.colorName,
-            position: i,
-          })),
+    // The same entry the /web create route writes — `auditCtx` stamps
+    // `via: 'apikey'` from the key's user, which is the only difference a reader
+    // sees. See routes/web/engagements.ts for why the entry is hand-written.
+    const eng = await withIntent(['engagement'], async () => {
+      const created = await app.db.engagement.create({
+        data: {
+          slug: input.slug,
+          name: input.name,
+          projectedEndAt: input.projectedEndAt ? new Date(input.projectedEndAt) : undefined,
+          roles: { create: { userId: user.id, role: 'admin' } },
+          // Explicit positions, as in the /web create route: the seed list's order
+          // becomes the engagement's initial curated tag order.
+          tags: {
+            create: defaultTags.map((t, i) => ({
+              name: t.name,
+              colorName: t.colorName,
+              position: i,
+            })),
+          },
         },
-      },
+      });
+      await recordAudit(auditCtx(req, { id: created.id, slug: created.slug, name: created.name }), {
+        action: 'create',
+        entityType: 'engagement',
+        entity: { id: String(created.id), label: created.name },
+        summary: `Created engagement ${q(created.name)} (${created.slug})`,
+        changes: [{ kind: 'count', label: 'Default tags copied', count: defaultTags.length }],
+      });
+      return created;
     });
     return serializeEngagement(eng, { role: 'admin', numUsers: 1, numEvidence: 0 });
   });
@@ -146,6 +160,9 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         operatorId: req.authedUser!.id,
         metadata,
         file,
+        // The entry is written inside the service, so a capture from the desktop
+        // app or reporter-term reads exactly like one made in the web UI.
+        audit: auditCtx(req, { id: eng.id, slug, name: eng.name }),
       });
       reply.status(201);
       return evidence;
