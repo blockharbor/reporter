@@ -301,6 +301,12 @@ export const ROLE_RANK: Record<EngagementRole, number> = { admin: 3, write: 2, r
  * and the PDF never disagree about what a vanished author is called.
  */
 export const DELETED_USER_LABEL = 'Deleted user';
+/**
+ * The badge on an audit entry whose engagement has been deleted, and the stem
+ * of the admin facet's "Deleted engagements" group. Pinned here like
+ * DELETED_USER_LABEL so the two surfaces cannot drift.
+ */
+export const DELETED_ENGAGEMENT_LABEL = 'Deleted engagement';
 
 /**
  * The one wording for the report-exclusion state. Every surface that lists
@@ -1017,6 +1023,15 @@ export const AUDIT_FIELD_LABELS: Partial<Record<AuditEntityType, Record<string, 
     'reportConfig.showFindingLinkedGoals': 'Report: linked goals on findings',
     'reportConfig.showStrengthDetailCards': 'Report: strength detail cards',
     'reportConfig.readinessNa': 'Report readiness waivers',
+    // The export / import entries' own changes.
+    sourceSlug: 'Source engagement',
+    sourceName: 'Source engagement name',
+    exportedAt: 'Exported at',
+    includeAll: 'Include findings not ready to report',
+    includeEvidenceContent: 'Include evidence content',
+    includeExcludedEvidence: 'Include report-excluded evidence',
+    mode: 'Import mode',
+    applyMetadata: 'Apply engagement details',
   },
   finding: {
     title: 'Title',
@@ -1055,11 +1070,53 @@ export const AUDIT_FIELD_LABELS: Partial<Record<AuditEntityType, Record<string, 
     disabled: 'Disabled',
     firstName: 'First name',
     lastName: 'Last name',
+    email: 'Email',
     headless: 'Headless',
+    expiresAt: 'Recovery link expires',
   },
   tag: { name: 'Name', colorName: 'Color', position: 'Position' },
   member: { role: 'Role' },
+  evidence_comment: { body: 'Note' },
+  finding_category: { category: 'Category' },
+  generated_report: {
+    preset: 'Report type',
+    format: 'Format',
+    label: 'Label',
+    version: 'Version',
+    framework: 'Attestation framework',
+    showExclusions: 'Show exclusions',
+  },
+  report_template: { name: 'Name', description: 'Description', config: 'Configuration' },
+  report_settings: {
+    organizationName: 'Organization name',
+    accentColor: 'Accent color',
+    logoDataUri: 'Logo',
+    footerNote: 'Footer note',
+  },
+  saved_query: { name: 'Name', type: 'Type', query: 'Query' },
+  default_tag: { name: 'Name', colorName: 'Color' },
+  api_key: { createdAt: 'Created' },
 };
+
+/** `includeEvidenceContent` -> "Include evidence content"; a dotted path labels by its leaf. */
+export function humanizeAuditField(field: string): string {
+  const leaf = field.split('.').pop() ?? field;
+  const words = leaf
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * The one label for a diffed column, used by the server's summary sentences
+ * and the web's change list alike: the pinned label when there is one, else
+ * the de-camel-cased name — so a key nobody pinned still reads as words, never
+ * as `includeEvidenceContent`.
+ */
+export function auditFieldLabel(entityType: AuditEntityType, field: string): string {
+  return AUDIT_FIELD_LABELS[entityType]?.[field] ?? humanizeAuditField(field);
+}
 
 /**
  * A later save by the same actor of the same field of the same entity within

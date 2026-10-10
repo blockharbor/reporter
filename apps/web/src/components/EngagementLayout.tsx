@@ -2,6 +2,7 @@ import { NavLink, Outlet, useParams } from 'react-router-dom';
 import { Badge, Spinner } from '@reporter/ui';
 import { useEngagement } from '../api/hooks.js';
 import { formatDate } from '../lib/format.js';
+import { useEngagementPermissions } from '../lib/permissions.js';
 import { ProgressBar } from './goals/ProgressBar.js';
 
 const STATUS_TONE = { active: 'success', complete: 'info', archived: 'neutral' } as const;
@@ -9,6 +10,21 @@ const STATUS_TONE = { active: 'success', complete: 'info', archived: 'neutral' }
 export function EngagementLayout() {
   const { slug = '' } = useParams();
   const { data: eng, isLoading, isError } = useEngagement(slug);
+  // Same query key as the line above, so TanStack dedupes: no second request.
+  const { canWrite } = useEngagementPermissions(slug);
+
+  // Tab order is array order. The Audit log is the first tab hidden by role
+  // rather than rendered disabled (DESIGN.md's rule is for controls, not
+  // navigation): a read-only member has nothing to do there, and the log
+  // records membership and settings changes they see nowhere else. It hides
+  // only once the role is KNOWN to be read-only — `canWrite` reports false
+  // while the engagement is still loading (lib/permissions.ts), and this strip
+  // sits outside the `isLoading` guard below, so hiding on an unknown role
+  // would flicker the tab in on every load and yank it from under a user
+  // sitting on it during a refetch. A failed load keeps it too: the page
+  // behind it gates itself.
+  const roleKnown = eng !== undefined;
+  const showAuditLog = canWrite || !roleKnown;
 
   const tabs = [
     { to: 'evidence', label: 'Evidence' },
@@ -16,6 +32,7 @@ export function EngagementLayout() {
     { to: 'findings', label: 'Findings' },
     { to: 'reports', label: 'Reports' },
     { to: 'queries', label: 'Saved queries' },
+    ...(showAuditLog ? [{ to: 'audit-log', label: 'Audit log' }] : []),
     { to: 'settings', label: 'Settings' },
   ];
 

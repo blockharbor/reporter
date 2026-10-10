@@ -1,4 +1,4 @@
-import { Badge } from '@reporter/ui';
+import { FilterChip } from '@reporter/ui';
 import {
   FINDING_KIND_LABELS,
   FIX_EFFORT_LABELS,
@@ -11,22 +11,6 @@ import {
 } from '@reporter/shared';
 import { UNCATEGORIZED_LABEL } from './filters/CategoryFilter.js';
 import type { FindingsFilterState, MappingFilter } from './findings-filter.js';
-
-function RemovableChip({ label, onRemove }: { label: string; onRemove: () => void }) {
-  return (
-    <Badge tone="accent" className="pr-1">
-      <span>{label}</span>
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label={`Remove filter ${label}`}
-        className="ml-0.5 rounded-full px-1 leading-none opacity-80 hover:opacity-100"
-      >
-        ×
-      </button>
-    </Badge>
-  );
-}
 
 const mappingLabel = (standard: string, mapping: MappingFilter): string =>
   mapping === 'any' ? `${standard}: mapped` : `${standard}: not mapped`;
@@ -63,62 +47,58 @@ export function ActiveFindingFilterChips({
   return (
     <div className="flex flex-wrap items-center gap-2">
       {filter.severities.map((s) => (
-        <RemovableChip
+        <FilterChip
           key={`sev-${s}`}
           label={`Severity: ${SEVERITY_LABELS[s]}`}
           onRemove={() => removeSeverity(s)}
         />
       ))}
       {filter.unrated && (
-        <RemovableChip
+        <FilterChip
           label="Severity: Unrated"
           onRemove={() => onChange({ ...filter, unrated: false })}
         />
       )}
       {filter.kinds.map((k) => (
-        <RemovableChip
+        <FilterChip
           key={`kind-${k}`}
           label={`Kind: ${FINDING_KIND_LABELS[k]}`}
           onRemove={() => removeKind(k)}
         />
       ))}
       {filter.categories.map((c) => (
-        <RemovableChip
-          key={`cat-${c}`}
-          label={`Category: ${c}`}
-          onRemove={() => removeCategory(c)}
-        />
+        <FilterChip key={`cat-${c}`} label={`Category: ${c}`} onRemove={() => removeCategory(c)} />
       ))}
       {filter.uncategorized && (
-        <RemovableChip
+        <FilterChip
           label={`Category: ${UNCATEGORIZED_LABEL}`}
           onRemove={() => onChange({ ...filter, uncategorized: false })}
         />
       )}
       {filter.tags.map((t) => (
-        <RemovableChip key={`tag-${t}`} label={`Tag: ${t}`} onRemove={() => removeTag(t)} />
+        <FilterChip key={`tag-${t}`} label={`Tag: ${t}`} onRemove={() => removeTag(t)} />
       ))}
       {filter.readyToReport !== undefined && (
-        <RemovableChip
+        <FilterChip
           label={filter.readyToReport ? 'Ready to report' : 'Not ready to report'}
           onRemove={() => onChange({ ...filter, readyToReport: undefined })}
         />
       )}
       {filter.fixEfforts.map((e) => (
-        <RemovableChip
+        <FilterChip
           key={`effort-${e}`}
           label={`Fix effort: ${FIX_EFFORT_LABELS[e]}`}
           onRemove={() => removeEffort(e)}
         />
       ))}
       {filter.hasEvidence !== undefined && (
-        <RemovableChip
+        <FilterChip
           label={filter.hasEvidence ? 'Has linked evidence' : 'No linked evidence'}
           onRemove={() => onChange({ ...filter, hasEvidence: undefined })}
         />
       )}
       {filter.hasRecommendations !== undefined && (
-        <RemovableChip
+        <FilterChip
           label={
             filter.hasRecommendations
               ? 'Has strategic recommendation'
@@ -128,20 +108,16 @@ export function ActiveFindingFilterChips({
         />
       )}
       {filter.affectedTargets.map((t) => (
-        <RemovableChip
-          key={`target-${t}`}
-          label={`Target: ${t}`}
-          onRemove={() => removeTarget(t)}
-        />
+        <FilterChip key={`target-${t}`} label={`Target: ${t}`} onRemove={() => removeTarget(t)} />
       ))}
       {filter.iso21434 !== undefined && (
-        <RemovableChip
+        <FilterChip
           label={mappingLabel('ISO 21434', filter.iso21434)}
           onRemove={() => onChange({ ...filter, iso21434: undefined })}
         />
       )}
       {filter.iso21434Refs.map((id) => (
-        <RemovableChip
+        <FilterChip
           key={`iso-${id}`}
           // An unknown (legacy) id has no catalog entry; show the raw id rather
           // than hiding a constraint that is really applied.
@@ -150,13 +126,13 @@ export function ActiveFindingFilterChips({
         />
       ))}
       {filter.unr155 !== undefined && (
-        <RemovableChip
+        <FilterChip
           label={mappingLabel('UN R155', filter.unr155)}
           onRemove={() => onChange({ ...filter, unr155: undefined })}
         />
       )}
       {filter.unr155Refs.map((id) => (
-        <RemovableChip
+        <FilterChip
           key={`unr-${id}`}
           label={`UN R155: ${unr155Ref(id)?.clause ?? id}`}
           onRemove={() => removeUnrRef(id)}

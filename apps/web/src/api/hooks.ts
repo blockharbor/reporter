@@ -1,9 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   Activity,
   AdminEngagement,
   AdminUser,
   ApiKey,
+  AuditFacets,
+  AuditLogPage,
   CreateActivityInput,
   CreateEvidenceInput,
   CreateFindingInput,
@@ -28,6 +30,7 @@ import type {
   EngagementImportResult,
   LinkedGoal,
   MergeTagResult,
+  RemoveAuditEntryResult,
   ReportSettings,
   ReportTemplate,
   SavedQuery,
@@ -155,6 +158,10 @@ export function useDeleteEngagement(slug: string) {
       qc.removeQueries({ queryKey: engKey(slug) });
       qc.invalidateQueries({ queryKey: ['engagements'] });
       qc.invalidateQueries({ queryKey: ['admin-engagements'] });
+      // The admin audit log's Engagement facet groups engagements live vs
+      // deleted, and its rows name them: both move with this write.
+      qc.invalidateQueries({ queryKey: ['admin-audit'] });
+      qc.invalidateQueries({ queryKey: ['admin-audit-facets'] });
     },
   });
 }
@@ -200,6 +207,10 @@ export function useImportEngagement() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['engagements'] });
       qc.invalidateQueries({ queryKey: ['admin-engagements'] });
+      // The admin audit log's Engagement facet groups engagements live vs
+      // deleted, and its rows name them: both move with this write.
+      qc.invalidateQueries({ queryKey: ['admin-audit'] });
+      qc.invalidateQueries({ queryKey: ['admin-audit-facets'] });
     },
   });
 }
@@ -944,6 +955,87 @@ export function useDeleteSavedQuery(slug: string) {
   });
 }
 
+// --- Audit log ---
+
+/**
+ * The engagement's audit log, one page at a time. `query` is the canonical
+ * wire querystring from `auditQueryString()` in components/audit/audit-filter.ts
+ * — the same param names the page writes to the URL — so the key carries the
+ * FULL query and two views with different filters, sort or page never share a
+ * cache entry. `placeholderData: keepPreviousData` keeps the previous page's
+ * rows on screen (the page dims them) while the next one loads, instead of
+ * collapsing the table to a spinner on every Next. The tab is for writers and
+ * admins; the page passes `enabled: false` for read-only members so a deep
+ * link to a hidden tab never produces a 403 toast.
+ */
+export const useAuditLog = (slug: string, query: string, enabled = true) =>
+  useQuery({
+    queryKey: ['audit-log', slug, query],
+    queryFn: () =>
+      api.get<AuditLogPage>(`/web/engagements/${slug}/audit-log${query ? `?${query}` : ''}`),
+    enabled: Boolean(slug) && enabled,
+    placeholderData: keepPreviousData,
+  });
+
+/**
+ * The option lists the engagement's filter bar draws from — the actors who
+ * have entries here (folded by account, deleted ones by their snapshotted
+ * email), the actions and entity types present, and the day the log began.
+ * Fetched once per view, not per keystroke: the facets describe the scope,
+ * not the current filter, so the long staleTime of `useEvidenceOperators`.
+ */
+export const useAuditFacets = (slug: string, enabled = true) =>
+  useQuery({
+    queryKey: ['audit-facets', slug],
+    queryFn: () => api.get<AuditFacets>(`/web/engagements/${slug}/audit-log/facets`),
+    staleTime: 5 * 60_000,
+    enabled: Boolean(slug) && enabled,
+  });
+
+/** The site-wide log (Admin → Audit log). Same key discipline as `useAuditLog`. */
+export const useAdminAuditLog = (query: string, enabled = true) =>
+  useQuery({
+    queryKey: ['admin-audit', query],
+    queryFn: () => api.get<AuditLogPage>(`/web/admin/audit-log${query ? `?${query}` : ''}`),
+    enabled,
+    placeholderData: keepPreviousData,
+  });
+
+/** Site-wide facets; the only payload that carries the `engagements` list. */
+export const useAdminAuditFacets = (enabled = true) =>
+  useQuery({
+    queryKey: ['admin-audit-facets'],
+    queryFn: () => api.get<AuditFacets>('/web/admin/audit-log/facets'),
+    staleTime: 5 * 60_000,
+    enabled,
+  });
+
+/**
+ * Tamper-evident removal of one entry (site admins only). The row becomes a
+ * tombstone in place, so every list that could show it is invalidated: the
+ * admin log and its facets, and — when the entry names a live engagement —
+ * that engagement's own tab and facets. A removed entry has blank text and
+ * no changes, so the search facets may shrink too.
+ */
+export function useRemoveAuditEntry() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { uuid: string; reason: string }) =>
+      api.post<RemoveAuditEntryResult>(`/web/admin/audit-log/${args.uuid}/remove`, {
+        reason: args.reason,
+      }),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ['admin-audit'] });
+      qc.invalidateQueries({ queryKey: ['admin-audit-facets'] });
+      const slug = result.entry.engagement?.slug;
+      if (slug) {
+        qc.invalidateQueries({ queryKey: ['audit-log', slug] });
+        qc.invalidateQueries({ queryKey: ['audit-facets', slug] });
+      }
+    },
+  });
+}
+
 // --- Account ---
 export interface AccountApiKey {
   accessKey: string;
@@ -1020,6 +1112,13 @@ export function useDeleteUser() {
       qc.invalidateQueries({ queryKey: ['finding'] });
       // Their API keys were revoked with them; drop the cached list outright.
       qc.removeQueries({ queryKey: ['admin-user-api-keys', slug] });
+      // Every audit row they touched keeps its snapshot but loses its live
+      // link and "now called" hint, and the actor facets refold them under
+      // the snapshotted email — on every engagement and on the site log.
+      qc.invalidateQueries({ queryKey: ['audit-log'] });
+      qc.invalidateQueries({ queryKey: ['audit-facets'] });
+      qc.invalidateQueries({ queryKey: ['admin-audit'] });
+      qc.invalidateQueries({ queryKey: ['admin-audit-facets'] });
     },
   });
 }

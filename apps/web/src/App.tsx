@@ -15,6 +15,7 @@ import { GoalsPage } from './pages/GoalsPage.js';
 import { ReportsPage } from './pages/ReportsPage.js';
 import { QueriesPage } from './pages/QueriesPage.js';
 import { EngagementSettingsPage } from './pages/EngagementSettingsPage.js';
+import { EngagementAuditLogPage } from './pages/EngagementAuditLogPage.js';
 import { AccountPage } from './pages/AccountPage.js';
 import { AdminPage } from './pages/AdminPage.js';
 
@@ -61,6 +62,10 @@ export function App() {
           <Route path="reports" element={<ReportsPage />} />
           <Route path="tags" element={<Navigate to="../settings" replace />} />
           <Route path="queries" element={<QueriesPage />} />
+          {/* Registered for every member like the other tabs — App has no
+              engagement role to gate on. EngagementLayout hides the tab from
+              read-only members and the page turns a direct visitor away. */}
+          <Route path="audit-log" element={<EngagementAuditLogPage />} />
           <Route path="settings" element={<EngagementSettingsPage />} />
         </Route>
         <Route path="/account" element={<AccountPage />} />

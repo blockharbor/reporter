@@ -72,9 +72,9 @@ import { Prisma } from '@prisma/client';
 import type { Engagement, PrismaClient } from '@prisma/client';
 import type { FastifyBaseLogger, FastifyRequest } from 'fastify';
 import {
+  auditFieldLabel,
   AUDIT_COALESCE_WINDOW_MS,
   AUDIT_ENTRY_MAX_BYTES,
-  AUDIT_FIELD_LABELS,
   AUDIT_VALUE_MAX_CHARS,
   MAX_AUDIT_CHANGES,
   auditChangeSchema,
@@ -640,19 +640,9 @@ export function n(count: number, singular: string, plural = `${singular}s`): str
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
-/** `executiveSummary` -> "Executive summary"; a dotted path labels by its leaf. */
-function humanize(field: string): string {
-  const leaf = field.split('.').pop() ?? field;
-  const words = leaf
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/[_-]+/g, ' ')
-    .toLowerCase();
-  return words.charAt(0).toUpperCase() + words.slice(1);
-}
-
-/** The shared label for a diffed column, falling back to a de-camel-cased name. */
+/** The shared label for a diffed column — `auditFieldLabel`, so the web renders the same words. */
 export function fieldLabel(entityType: AuditEntityType, field: string): string {
-  return AUDIT_FIELD_LABELS[entityType]?.[field] ?? humanize(field);
+  return auditFieldLabel(entityType, field);
 }
 
 /**

@@ -163,7 +163,8 @@ describe('wording helpers', () => {
   it('fieldLabel() uses the shared label and falls back to a de-camel-cased name', () => {
     expect(fieldLabel('engagement', 'executiveSummary')).toBe('Executive summary');
     expect(fieldLabel('engagement', 'reportConfig.sections')).toBe('Report sections');
-    expect(fieldLabel('evidence_comment', 'body')).toBe('Body');
+    // Pinned in @reporter/shared: an Evidence note's body reads "Note", not "Body".
+    expect(fieldLabel('evidence_comment', 'body')).toBe('Note');
     expect(fieldLabel('engagement', 'someNewColumnName')).toBe('Some new column name');
     expect(fieldLabel('engagement', 'reportConfig.brandNewFlag')).toBe('Brand new flag');
   });

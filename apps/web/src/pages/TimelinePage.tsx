@@ -10,6 +10,7 @@ import {
 } from '@reporter/shared';
 import { useTimeline, type EvidenceOperator } from '../api/hooks.js';
 import { READ_ONLY_TITLE, useEngagementPermissions } from '../lib/permissions.js';
+import { Pagination, parsePageParam } from '../components/common/Pagination.js';
 import { CreateEvidenceModal } from '../components/evidence/CreateEvidenceModal.js';
 import { FilterBar } from '../components/evidence/FilterBar.js';
 import { EvidenceDayGroup } from '../components/evidence/EvidenceDayGroup.js';
@@ -43,7 +44,8 @@ export function TimelinePage() {
   const { slug = '' } = useParams();
   const [params, setParams] = useSearchParams();
   const q = params.get('q') ?? '';
-  const page = Number(params.get('page') ?? '1');
+  // `?page=abc` and a bare `?page=` used to render "Page NaN of N" here.
+  const page = parsePageParam(params.get('page'));
   const [adding, setAdding] = useState(false);
 
   const parsed = useMemo(() => parseQuery(q), [q]);
@@ -148,29 +150,12 @@ export function TimelinePage() {
                 onToggle={() => toggleDay(g.key)}
               />
             ))}
-            {totalPages > 1 && (
-              <div className="mt-2 flex items-center justify-center gap-3 text-sm">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={page <= 1}
-                  onClick={() => goPage(page - 1)}
-                >
-                  Previous
-                </Button>
-                <span className="text-muted">
-                  Page {page} of {totalPages}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={page >= totalPages}
-                  onClick={() => goPage(page + 1)}
-                >
-                  Next
-                </Button>
-              </div>
-            )}
+            <Pagination
+              page={page}
+              totalPages={totalPages}
+              onPageChange={goPage}
+              className="mt-2"
+            />
           </div>
         )}
       </div>

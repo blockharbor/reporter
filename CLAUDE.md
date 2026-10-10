@@ -20,11 +20,12 @@
 
 ## Conventions
 
-- **Validation is zod-first.** Every API payload has a zod schema in `@reporter/shared`; types are `z.infer`red, never hand-written. Server routes validate with `fastify-type-provider-zod`.
+- **Validation is zod-first.** Every API payload has a zod schema in `@reporter/shared`; types are `z.infer`red, never hand-written. Server handlers call `schema.parse(req.body)` directly (there is no `fastify-type-provider-zod` in the tree).
 - **Never hand-duplicate types** that exist in `@reporter/shared`. Import them.
-- **HMAC signing lives in exactly one place**: `packages/api-client/src/sign.ts`. The server verifies with the same algorithm in `apps/server/src/plugins/hmac-auth.ts`. Do not reimplement it anywhere else.
+- **HMAC signing lives in exactly one place**: `packages/api-client/src/sign.ts`. The server verifies with the same algorithm in `apps/server/src/auth/guards.ts`. Do not reimplement it anywhere else.
 - **UI uses `@reporter/ui` primitives and tokens** — no hard-coded colors/spacing, no per-app component forks. See `DESIGN.md` and the `ux-ui` agent.
 - **Terminology is fixed** (see glossary in `DESIGN.md`): Engagement, Evidence, Finding, Tag. Same words in web, desktop, and CLI.
+- **Every write is audited.** A handler describes its own work with `recordAudit` / `recordUpdate` (`apps/server/src/services/audit.ts`); anything it does not describe, the backstop Prisma extension records at the row level. Any interactive `$transaction` that touches an audited model **must** be wrapped in `withIntent(models, fn)` naming exactly the models it writes, and must record an entry — the backstop cannot see inside a transaction, and a claimed write with no entry fails the test suite. `prisma db push` is unsupported for `audit_entries`: its append-only guard is a trigger that lives only in the migration SQL, and the server refuses to boot in production without it.
 - ESM everywhere (`"type": "module"`). TS strict, `noUncheckedIndexedAccess` on.
 - **No AI attribution in git or GitHub.** Never append a `Co-Authored-By: Claude …` trailer
   to a commit, or a "Generated with Claude Code" line to a pull request, release note,

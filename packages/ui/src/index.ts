@@ -7,6 +7,7 @@ export * from './Spinner.js';
 export * from './Input.js';
 export * from './Card.js';
 export * from './Badge.js';
+export * from './FilterChip.js';
 export * from './SeverityBadge.js';
 export * from './TagChip.js';
 export * from './TagPicker.js';

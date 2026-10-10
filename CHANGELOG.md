@@ -10,6 +10,64 @@ with `pnpm run version:bump <major|minor|patch>`.
 
 ### Added
 
+- **Every engagement has an Audit log tab, next to Settings.** It is the record of
+  everything that happened to the engagement — every save, link, reorder, upload,
+  report, export and membership change — with who did it, when, what changed and
+  what it changed to, in plain sentences ("Edited finding “Open diagnostic
+  session”: Severity", "Merged tag “recon” into “exfil”: 12 evidence and 3 findings
+  relinked") that open into the field-by-field diff. A burst of edits to one field
+  within a few minutes folds into a single line that says how many saves it holds
+  and when the last one landed, so an autosaving form does not bury the log under
+  keystrokes. The bar above the table searches as you type and narrows by who,
+  action, what was changed and date, the table sorts on When, Who and Action, and
+  the whole view — filters, sort and page — lives in the URL, so a link reproduces
+  it. The Who column always shows the name and email the entry recorded at the
+  time, with the account's current name as a hint if it has since changed, because
+  anyone can rename themselves and the log must not relabel history; a deleted
+  account keeps its name there too. The tab is for writers and admins — it shows
+  membership and settings changes a read-only member sees nowhere else — and is the
+  one tab hidden by role rather than shown disabled, hiding only once the role is
+  known so it never flickers; a read-only deep link lands on an explanation, not an
+  error. Underneath, every write on the server is recorded twice over: handlers
+  describe their own work in the glossary's words, and a backstop records at the
+  row level anything a handler forgot, so a new feature cannot quietly go unlogged.
+  No password hash, session token, API secret, TOTP secret, recovery code, image
+  data or raw proposal ever reaches the log; names and emails do, on purpose.
+
+- **Admin → Audit log: the whole server's record, with tamper-evident removal.** A
+  sixth admin tab lists every entry across every engagement, plus the sign-ins,
+  failed sign-ins against known accounts, password changes, recovery links, API-key
+  events and admin changes that belong to no engagement ("No engagement" in the
+  Engagement column and as a facet). An engagement that has been deleted keeps its
+  rows, labelled by the name it had, and the Engagement facet lists it under
+  "Deleted engagements" — a slug that is later reused never inherits the dead
+  engagement's history. Entries are never deleted: a database trigger refuses every
+  delete and every rewrite of recorded content. What a site admin can do is
+  **remove** one — for the case where a credential or private detail landed in a
+  diff — through a dialog that requires a reason and says plainly that the entry's
+  details are erased for good while a permanent record of the removal (who, when,
+  why) takes their place; that record cannot itself be removed, and the control
+  stays visible but disabled on it. Two admins removing the same entry at once get
+  one success and one "already removed". The guarantee is against the application,
+  not against a database superuser, who can drop the trigger; the docs say so.
+  Entries restored from an engagement backup carry an **Imported** badge, because a
+  file can say anything and this server did not witness it.
+
+- **Engagement backups carry the audit log, and an import restores it.** The export
+  (now format version 3) writes the newest hundred thousand live entries and records
+  the total beside them, so an oversized log degrades a backup's completeness
+  rather than breaking the backup; `?includeAuditLog=0` leaves the log out, and the
+  file then keeps the older stamp so it still imports on a server that predates the
+  feature. An import restores every entry re-pointed at the new engagement — the
+  ids of evidence, findings, notes and reports remapped to the copy's own rows —
+  marked as imported, with its actor resolved by email where an account exists and
+  kept as a name and email where none does, and writes one entry of its own saying
+  where the file came from. Removed entries do not travel, and a file whose entries
+  arrive carrying removal fields is refused. Because the archive now holds the
+  engagement's membership history and the name and email of everyone who acted on
+  it, the engagement-admin bar on the export is now also about new access, not only
+  aggregation; the glossary says what an export contains.
+
 - **Findings can carry tags, drawn from the engagement's existing tag pool.** A
   finding's Details card gained a **Tags** picker beside Category and Affected
   target, the chips show on every finding card — including the one inside the
@@ -92,6 +150,30 @@ with `pnpm run version:bump <major|minor|patch>`.
   can light up without another format change once findings carry tags.
 
 ### Changed
+
+- **Smaller things that moved with the audit log.** Deleting an engagement now runs
+  in one transaction with its log entry, written before the row goes, so a
+  destructive delete can never commit unrecorded; deleting a user keeps their audit
+  entries under the recorded name and email, and the delete dialog says so. The
+  Admin page's active tab lives in `?tab=` (absent means Users), so the Audit log's
+  filters can be deep-linked and the other tabs gain a reload-stable URL; a tab
+  switch clears the params that belonged to the tab being left. The evidence
+  timeline's pager is now the shared `Pagination` control, which also fixed the
+  "Page NaN of N" it showed for a bad `?page=`. The report-branding read used to be
+  an upsert that minted the branding row on first render — which, with the log in
+  place, would have attributed "Created report branding" to whoever rendered a PDF
+  first on a fresh server; it now returns the defaults until an admin saves. Filter
+  and sort bars gained written policy in `DESIGN.md` (apply as you type; replace for
+  filters and push for pages; Clear all in the right-hand group), along with the
+  audit log's vocabulary and the one documented exception to "disabled, not hidden"
+  for role-gated navigation. `CLAUDE.md` no longer claims a `fastify-type-provider-zod`
+  the server never used or a `plugins/hmac-auth.ts` that does not exist, and the
+  server guide records that `trustProxy: true` makes the login rate limit's IP
+  attacker-controlled on a plain-HTTP deployment — a follow-up this change
+  deliberately does not take, which is also why the log stores no IP. `DEPLOY.md`
+  and the server README say that migrations are the only supported path for the
+  audit table (its guard trigger lives in the migration SQL) and that the table
+  grows forever and should be planned for.
 
 - **The page is wider: 1320px of content, up from 1120px.** The app shell was
   capped at Tailwind's stock `max-w-6xl` (1152px), which leaves 1120px inside its

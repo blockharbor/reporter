@@ -12,7 +12,7 @@ import { ActiveFilterChips } from './ActiveFilterChips.js';
 import { TagsFilter } from './filters/TagsFilter.js';
 import { TypeFilter } from './filters/TypeFilter.js';
 import { OperatorFilter } from './filters/OperatorFilter.js';
-import { DateFilter } from './filters/DateFilter.js';
+import { DateFilter } from '../common/DateFilter.js';
 import { FindingSortControls } from './filters/FindingSortControls.js';
 
 /** Render the free-text terms back into an editable string for the search box. */

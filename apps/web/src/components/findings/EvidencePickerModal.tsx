@@ -23,7 +23,7 @@ import { useAttachEvidence, useTags, useTimeline } from '../../api/hooks.js';
 import { EvidenceContent } from '../evidence/EvidenceContent.js';
 import { TypeFilter } from '../evidence/filters/TypeFilter.js';
 import { TagsFilter } from '../evidence/filters/TagsFilter.js';
-import { DateFilter } from '../evidence/filters/DateFilter.js';
+import { DateFilter } from '../common/DateFilter.js';
 import { evidenceHeading, evidenceSnippet } from '../../lib/evidence-label.js';
 import { formatDateTime } from '../../lib/format.js';
 import { evidenceThumbUrl } from '../../lib/urls.js';

@@ -1,4 +1,4 @@
-import { Badge, Button, TagChip, type PickableTag } from '@reporter/ui';
+import { Button, FilterChip, TagChip, type PickableTag } from '@reporter/ui';
 import {
   EVIDENCE_TYPE_LABELS,
   isEmptyQuery,
@@ -24,22 +24,6 @@ function formatRangeLabel(r: DateRange): string {
   if (r.from) return formatYmd(r.from);
   if (r.to) return formatYmd(r.to);
   return 'Any date';
-}
-
-function RemovableChip({ label, onRemove }: { label: string; onRemove: () => void }) {
-  return (
-    <Badge tone="accent" className="pr-1">
-      <span>{label}</span>
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label={`Remove filter ${label}`}
-        className="ml-0.5 rounded-full px-1 leading-none opacity-80 hover:opacity-100"
-      >
-        ×
-      </button>
-    </Badge>
-  );
 }
 
 /**
@@ -120,47 +104,44 @@ export function ActiveFilterChips({
         />
       ))}
       {parsed.operators.map((slug) => (
-        <RemovableChip
+        <FilterChip
           key={`op-${slug}`}
           label={`Operator: ${opNameBySlug.get(slug) ?? slug}`}
           onRemove={() => removeOperator(slug)}
         />
       ))}
       {parsed.types.map((type) => (
-        <RemovableChip
+        <FilterChip
           key={`type-${type}`}
           label={`Type: ${EVIDENCE_TYPE_LABELS[type]}`}
           onRemove={() => removeType(type)}
         />
       ))}
       {parsed.dateRanges.map((r, i) => (
-        <RemovableChip
+        <FilterChip
           key={`range-${i}`}
           label={formatRangeLabel(r)}
           onRemove={() => removeRange(i)}
         />
       ))}
       {parsed.uuids.map((u) => (
-        <RemovableChip
+        <FilterChip
           key={`uuid-${u}`}
           label={`UUID: ${u.slice(0, 8)}…`}
           onRemove={() => removeUuid(u)}
         />
       ))}
       {parsed.withFinding !== undefined && (
-        <RemovableChip
+        <FilterChip
           label={parsed.withFinding ? 'With a finding' : 'Without a finding'}
           onRemove={clearFinding}
         />
       )}
       {parsed.starred !== undefined && (
-        <RemovableChip
-          label={parsed.starred ? 'Starred' : 'Not starred'}
-          onRemove={clearStarred}
-        />
+        <FilterChip label={parsed.starred ? 'Starred' : 'Not starred'} onRemove={clearStarred} />
       )}
       {parsed.noComments !== undefined && (
-        <RemovableChip label="Comments hidden" onRemove={clearNoComments} />
+        <FilterChip label="Comments hidden" onRemove={clearNoComments} />
       )}
       <Button variant="ghost" size="sm" onClick={clearAll}>
         Clear all

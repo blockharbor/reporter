@@ -252,6 +252,11 @@ docker compose up -d --build   # rebuilds; migrations re-apply automatically
 > discard is local edits to tracked files, so run `git status` first and copy aside
 > anything of your own. Take a [backup](#backups) before any update regardless.
 
+> **Migrations only, never `prisma db push`.** The audit log's append-only guard is a
+> database trigger that exists only in the migration SQL. `docker compose up` re-applies
+> migrations; a schema pushed any other way has no trigger, and the server refuses to
+> start in production when it is missing.
+
 **Clients:** rebuild the `.dmg` / tarball and reinstall (steps above).
 
 ## Backups
@@ -267,6 +272,14 @@ docker run --rm -v reporter_blobdata:/data -v "$PWD":/backup alpine \
 ```
 
 Restore into a fresh stack: load the SQL with `psql`, and untar the blobs back into the volume. See [apps/server/README.md](apps/server/README.md#backup--restore).
+
+**The audit log grows and is never pruned.** Every save, sign-in, download, export and
+report on the server adds a row to `audit_entries`; an actively worked engagement adds on
+the order of a few thousand rows a month, and the table cannot be trimmed by any supported
+path — a removal blanks a row's content but keeps the row. Plan disk and dump size with
+that in mind, and keep autovacuum enabled for the table (it is, by default): edits to one
+field within a short window fold into an existing row by updating it in place, which is
+exactly the pattern autovacuum exists to clean up after.
 
 ## Troubleshooting
 

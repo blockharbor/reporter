@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Badge,
@@ -65,29 +65,54 @@ import { copyToClipboard } from '../lib/clipboard.js';
 import { sectionLabel } from '../lib/report-sections.js';
 import { userDisplayName } from '../lib/user-display.js';
 import { TemplateSanitizeBadge } from '../components/engagement/TemplateSanitizeBadge.js';
+import { AuditLogTab } from '../components/admin/AuditLogTab.js';
+
+/**
+ * The admin tabs. The active key lives in `?tab=` (absent = Users) so the
+ * Audit log tab's filters — which are URL params of their own — can be
+ * deep-linked, and the other five tabs gain a reload-stable URL for free.
+ * Validated against this list, so a stale or hand-edited `?tab=` falls back to
+ * Users instead of rendering nothing.
+ */
+export const ADMIN_TABS = [
+  { key: 'users', label: 'Users' },
+  { key: 'default-tags', label: 'Default tags' },
+  { key: 'engagements', label: 'Engagements' },
+  { key: 'branding', label: 'Report branding' },
+  { key: 'report-templates', label: 'Report templates' },
+  { key: 'audit-log', label: 'Audit log' },
+] as const;
+export type AdminTabKey = (typeof ADMIN_TABS)[number]['key'];
+
+const isAdminTabKey = (raw: string | null): raw is AdminTabKey =>
+  ADMIN_TABS.some((t) => t.key === raw);
 
 export function AdminPage() {
-  const [tab, setTab] = useState('users');
+  const [params, setParams] = useSearchParams();
+  const raw = params.get('tab');
+  const tab: AdminTabKey = isAdminTabKey(raw) ? raw : 'users';
+
+  // A tab switch is navigation, so it PUSHES — unlike the audit filters below
+  // it, which replace — and it writes only the new key: every other param
+  // belongs to the tab being left (an audit filter means nothing on Users).
+  // Re-clicking the active tab with nothing else in the URL is not a switch;
+  // pushing an identical entry would only make the next Back a no-op.
+  const selectTab = (key: string) => {
+    const next = new URLSearchParams(key === 'users' ? {} : { tab: key });
+    if (next.toString() === params.toString()) return;
+    setParams(next);
+  };
+
   return (
     <div>
       <h1 className="mb-4 text-2xl font-semibold text-text">Admin</h1>
-      <Tabs
-        className="mb-6"
-        active={tab}
-        onChange={setTab}
-        tabs={[
-          { key: 'users', label: 'Users' },
-          { key: 'default-tags', label: 'Default tags' },
-          { key: 'engagements', label: 'Engagements' },
-          { key: 'branding', label: 'Report branding' },
-          { key: 'report-templates', label: 'Report templates' },
-        ]}
-      />
+      <Tabs className="mb-6" active={tab} onChange={selectTab} tabs={[...ADMIN_TABS]} />
       {tab === 'users' && <UsersTab />}
       {tab === 'default-tags' && <DefaultTagsTab />}
       {tab === 'engagements' && <EngagementsTab />}
       {tab === 'branding' && <ReportBrandingTab />}
       {tab === 'report-templates' && <ReportTemplatesTab />}
+      {tab === 'audit-log' && <AuditLogTab />}
     </div>
   );
 }
@@ -210,10 +235,12 @@ function UsersTab() {
               account.
             </span>
             <span className="block">
-              Kept: {impact.evidence} evidence item{impact.evidence === 1 ? '' : 's'} and{' '}
-              {impact.comments} comment{impact.comments === 1 ? '' : 's'} of theirs. Evidence is the
-              client deliverable, so it outlives its author — it stays in the timeline, on its
-              findings and in reports, attributed to “{DELETED_USER_LABEL}”.
+              Kept: {impact.evidence} piece{impact.evidence === 1 ? '' : 's'} of evidence and{' '}
+              {impact.comments} evidence note{impact.comments === 1 ? '' : 's'} of theirs. Evidence
+              is the client deliverable, so it outlives its author — it stays in the timeline, on
+              its findings and in reports, attributed to “{DELETED_USER_LABEL}”. Their audit log
+              entries are kept too, and keep showing the name and email the log recorded at the
+              time.
             </span>
             <span className="block text-warning">This cannot be undone.</span>
           </span>

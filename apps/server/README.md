@@ -55,6 +55,8 @@ docker run --rm -v reporter_blobdata:/data -v "$PWD":/backup alpine \
 
 (With `BLOB_STORE=s3`, back up the bucket instead of the volume.)
 
+The `audit_entries` table is append-only — no supported path deletes from it, and removing an entry only blanks its content in place — so on a long-lived server it comes to dominate the dump. That is expected: keep it, because restoring without it restores every engagement with no history.
+
 ## Architecture
 
 See [CLAUDE.md](CLAUDE.md) for the internal layout (two auth planes, blob store, evidence pipeline, timeline filtering) and the [api-client README](../../packages/api-client/README.md) for the HMAC protocol.
